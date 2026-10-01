@@ -52,12 +52,15 @@ export function TradeView({ initialSymbol, initialInterval }: { initialSymbol: s
 
   const lines = useMemo<ChartLine[]>(() => {
     const out: ChartLine[] = [];
-    if (position)
+    if (position) {
       out.push({
         price: position.avg_entry,
         color: position.side === "long" ? "#16c784" : "#ea3943",
-        title: `${position.side === "long" ? "Long" : "Short"} ${fmtQty(position.qty, info.qtyDecimals)}`,
+        title: `${position.side === "long" ? "Long" : "Short"} ${position.leverage}x ${fmtQty(position.qty, info.qtyDecimals)}`,
       });
+      if (position.liq_price && position.liq_price > 0)
+        out.push({ price: position.liq_price, color: "#f59e0b", title: "Liq.", dashed: true });
+    }
     (orders ?? [])
       .filter((o) => o.symbol === symbol && o.limit_price)
       .forEach((o) =>

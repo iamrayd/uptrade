@@ -8,10 +8,12 @@ import type { Candle, Fill, JournalEntry, Position } from "@/lib/types";
 import { unwrap, useQuery } from "@/hooks/useQuery";
 import { useSymbolInfo } from "@/hooks/useMarket";
 import { Chart } from "@/components/Chart";
+import { LevBadge } from "@/components/PositionsList";
+import { netPnl, usedMargin } from "@/lib/pnl";
 import { IndicatorLegend } from "@/components/IndicatorsMenu";
 import { useIndicators } from "@/lib/chartPrefs";
 import { JournalEditor } from "@/components/JournalEditor";
-import { Card, EmptyState, SideBadge, Skeleton, cx } from "@/components/ui";
+import { Card, EmptyState, LiqBadge, SideBadge, Skeleton, cx } from "@/components/ui";
 
 interface JournalData {
   position: Position | null;
@@ -78,18 +80,21 @@ export function JournalView({ positionId }: { positionId: string }) {
 function TradeSummary({ position: p }: { position: Position }) {
   const info = useSymbolInfo(p.symbol);
   const qty = p.status === "closed" ? p.entry_qty : p.qty;
-  const cost = p.avg_entry * p.closed_qty;
+  const net = netPnl(p);
+  const margin = usedMargin(p);
   return (
     <Card className="p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <h1 className="text-xl font-bold">{baseAsset(p.symbol)}/USDT</h1>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <h1 className="mr-1 text-xl font-bold">{baseAsset(p.symbol)}/USDT</h1>
           <SideBadge side={p.side} />
+          <LevBadge leverage={p.leverage} />
+          {p.close_reason === "liquidated" && <LiqBadge />}
           {p.status === "open" && <span className="text-xs text-muted">Still open</span>}
         </div>
-        <div className={cx("num text-xl font-bold", pnlClass(p.realized_pnl))}>
-          {fmtSignedUsd(p.realized_pnl)}{" "}
-          <span className="text-sm font-medium">{fmtPct(cost ? (p.realized_pnl / cost) * 100 : null)}</span>
+        <div className={cx("num text-right text-xl font-bold", pnlClass(net))}>
+          {fmtSignedUsd(net)} <span className="text-sm font-medium">{fmtPct(margin ? (net / margin) * 100 : null)}</span>
+          <div className="text-xs font-normal text-muted">net of fees · return on margin</div>
         </div>
       </div>
       <div className="num mt-4 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
@@ -97,6 +102,10 @@ function TradeSummary({ position: p }: { position: Position }) {
         <Item label="Avg entry" value={fmtPrice(p.avg_entry, info.priceDecimals)} />
         <Item label="Avg exit" value={fmtPrice(p.avg_exit, info.priceDecimals)} />
         <Item label="Notional" value={fmtUsd(p.avg_entry * qty)} />
+        <Item label={`Margin (${p.leverage}x)`} value={fmtUsd(margin)} />
+        <Item label="Price PnL" value={fmtSignedUsd(p.realized_pnl)} />
+        <Item label={p.close_reason === "liquidated" ? "Fees incl. liquidation" : "Fees"} value={fmtUsd(p.fees)} />
+        <Item label="Liq. price" value={p.liq_price ? fmtPrice(p.liq_price, info.priceDecimals) : "None"} />
         <Item label="Opened" value={fmtDateTime(p.opened_at)} />
         <Item label="Closed" value={fmtDateTime(p.closed_at)} />
         <Item label="Held" value={fmtDuration(p.opened_at, p.closed_at)} />
@@ -138,9 +147,9 @@ function TradeChart({ position: p }: { position: Position }) {
   const lines = useMemo(
     () => [
       { price: p.avg_entry, color: "#6d8cff", title: "Entry" },
-      ...(p.avg_exit ? [{ price: p.avg_exit, color: p.realized_pnl >= 0 ? "#16c784" : "#ea3943", title: "Exit" }] : []),
+      ...(p.avg_exit ? [{ price: p.avg_exit, color: p.close_reason === "liquidated" ? "#f59e0b" : netPnl(p) >= 0 ? "#16c784" : "#ea3943", title: p.close_reason === "liquidated" ? "Liquidated" : "Exit" }] : []),
     ],
-    [p.avg_entry, p.avg_exit, p.realized_pnl],
+    [p],
   );
 
   return (
@@ -176,7 +185,10 @@ function FillsCard({ position: p, fills }: { position: Position; fills: Fill[] }
               {f.realized_pnl !== 0 && (
                 <div className={cx("font-medium", pnlClass(f.realized_pnl))}>{fmtSignedUsd(f.realized_pnl)}</div>
               )}
-              <div className="text-xs text-muted">{fmtDateTime(f.created_at)}</div>
+              <div className="text-xs text-muted">
+                {f.fee > 0 && <>fee {fmtUsd(f.fee)} · </>}
+                {fmtDateTime(f.created_at)}
+              </div>
             </div>
           </li>
         ))}

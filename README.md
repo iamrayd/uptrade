@@ -3,7 +3,7 @@
 A personal crypto paper-trading app and trade journal. It uses live Binance prices, runs on free tiers only, and works on desktop and phone.
 
 - **Live chart:** candlesticks from Binance (1m–1d), with your entry price and limit-order lines drawn on it.
-- **Orders:** market and limit, long and short, on a virtual USDT balance. One netted position per market, with no leverage.
+- **Orders:** market and limit, long and short, 1–125x isolated leverage with MEXC-style fees and liquidations.
 - **Positions:** live unrealized PnL. Closing a position takes two taps.
 - **History:** closed trades with realized PnL, win rate, profit factor, and filters by market, setup tag and outcome.
 - **Journal:** notes, setup tags, a 1–5 execution rating, and screenshots for each trade, shown next to a chart of the trade.
@@ -22,6 +22,28 @@ So UpTrade uses **Binance's public market-data servers** (`data-api.binance.visi
 - Small price gaps between exchanges are normal.
 
 The same note appears in the app, in the market picker and under Account → Market data.
+
+## Leverage, fees and liquidation
+
+UpTrade trades **USDT-margined, isolated-margin** positions from 1x to 125x, with one netted position per coin. The numbers are the same in the database engine (`supabase/schema.sql`) and in the order form preview (`src/lib/pnl.ts`).
+
+| | Formula |
+| --- | --- |
+| Margin | `size × entry ÷ leverage` |
+| Fee | taker **0.02%** (market orders, and limit orders that fill immediately) · maker **0%** (limit orders that wait in the book) · charged on `size × price` |
+| Unrealized PnL | long `(mark − entry) × size` · short `(entry − mark) × size` |
+| ROE | `unrealized PnL ÷ margin` |
+| Maintenance margin | **0.5%** of `size × price` |
+| Liquidation price | long `(entry − margin/size) ÷ (1 − 0.5%)` · short `(entry + margin/size) ÷ (1 + 0.5%)` |
+
+- **Adding to a position** uses that position's leverage, and the liquidation price is recalculated from the new average entry and total margin.
+- **Partially closing** releases margin in proportion to the size closed. The liquidation price stays the same.
+- **Liquidation** fills at the liquidation price, and **you lose the position's whole margin**. The price loss uses up the margin down to the 0.5% maintenance level, and that remainder is charged as a liquidation fee, as on MEXC and Binance. Your other positions and free balance are untouched.
+- A closing loss can never be bigger than the margin of the part being closed.
+- Liquidations run in the browser, like limit orders. They trigger live when the price touches the liquidation price. When you reopen the app, it also checks the candle highs and lows since your last fill, so a liquidation that happened while you were away is recorded at the time it happened.
+- Simplifications: liquidation uses the last traded price instead of an exchange mark price, there are no funding fees, and open limit orders don't reserve margin. A limit order that can't afford its margin when it fills is cancelled with the reason.
+
+The engine is covered by 52 checks run against real Postgres (PGlite).
 
 ## Chart indicators
 

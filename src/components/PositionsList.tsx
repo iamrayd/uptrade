@@ -4,10 +4,34 @@ import { useState } from "react";
 import type { SymbolInfo } from "@/lib/binance";
 import { closePosition } from "@/lib/actions";
 import { baseAsset, fmtDuration, fmtPct, fmtPrice, fmtQty, fmtSignedUsd, fmtUsd, pnlClass } from "@/lib/format";
-import { pnlPct, unrealizedPnl } from "@/lib/pnl";
+import { TAKER_FEE, distanceToLiq, roePct, unrealizedPnl } from "@/lib/pnl";
 import { toast } from "@/lib/store";
 import type { Position } from "@/lib/types";
 import { ConfirmButton, EmptyState, SideBadge, Skeleton, cx } from "./ui";
+
+export function LevBadge({ leverage }: { leverage: number }) {
+  return (
+    <span
+      className={cx(
+        "rounded px-1.5 py-0.5 text-[11px] font-bold",
+        leverage >= 50 ? "bg-amber-400/15 text-amber-400" : "bg-panel-2 text-muted",
+      )}
+    >
+      {leverage}x
+    </span>
+  );
+}
+
+function LiqCell({ p, mark, decimals }: { p: Position; mark: number | undefined; decimals?: number }) {
+  if (!p.liq_price) return <span className="text-faint">None</span>;
+  const d = distanceToLiq(p, mark);
+  return (
+    <span className="text-amber-400">
+      {fmtPrice(p.liq_price, decimals)}
+      {d != null && <span className={cx("ml-1 text-xs", d < 2 ? "text-down" : "text-faint")}>{d.toFixed(1)}%</span>}
+    </span>
+  );
+}
 
 export function PositionsList({
   positions,
@@ -30,8 +54,8 @@ export function PositionsList({
     setClosing(p.id);
     try {
       await closePosition(p.id, mark);
-      const pnl = unrealizedPnl(p, mark) ?? 0;
-      toast(pnl >= 0 ? "success" : "info", `Closed ${p.side} ${baseAsset(p.symbol)}`, `Realized ${fmtSignedUsd(pnl)}`);
+      const net = (unrealizedPnl(p, mark) ?? 0) - p.qty * mark * TAKER_FEE;
+      toast(net >= 0 ? "success" : "info", `Closed ${baseAsset(p.symbol)} ${p.side} ${p.leverage}x`, `≈ ${fmtSignedUsd(net)} after fee`);
     } catch (e) {
       toast("error", "Couldn't close position", (e as Error).message);
     } finally {
@@ -54,27 +78,25 @@ export function PositionsList({
           return (
             <li key={p.id} className="p-4" onClick={() => onSelectSymbol(p.symbol)}>
               <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5">
                   <span className="font-semibold">{baseAsset(p.symbol)}</span>
                   <SideBadge side={p.side} />
+                  <LevBadge leverage={p.leverage} />
                 </div>
                 <div className={cx("num text-right font-semibold", pnlClass(pnl))}>
-                  {fmtSignedUsd(pnl)} <span className="text-xs font-normal">{fmtPct(pnlPct(p, mark))}</span>
+                  {fmtSignedUsd(pnl)} <span className="text-xs font-normal">{fmtPct(roePct(p, mark))}</span>
                 </div>
               </div>
-              <div className="num mt-3 grid grid-cols-3 gap-2 text-xs">
-                <Stat label="Size" value={`${fmtQty(p.qty, info?.qtyDecimals)}`} />
+              <div className="num mt-3 grid grid-cols-3 gap-x-2 gap-y-2.5 text-xs">
+                <Stat label="Size" value={fmtQty(p.qty, info?.qtyDecimals)} />
                 <Stat label="Entry" value={fmtPrice(p.avg_entry, info?.priceDecimals)} />
                 <Stat label="Mark" value={fmtPrice(mark, info?.priceDecimals)} />
+                <Stat label="Margin" value={fmtUsd(p.margin)} />
+                <Stat label="Liq. price" value={<LiqCell p={p} mark={mark} decimals={info?.priceDecimals} />} />
+                <Stat label="Open" value={fmtDuration(p.opened_at, null)} />
               </div>
-              <div className="mt-3 flex items-center justify-between">
-                <span className="text-xs text-faint">Open {fmtDuration(p.opened_at, null)}</span>
-                <ConfirmButton
-                  label="Close"
-                  confirmLabel="Confirm"
-                  loading={closing === p.id}
-                  onConfirm={() => close(p)}
-                />
+              <div className="mt-3 flex justify-end">
+                <ConfirmButton label="Close" confirmLabel="Confirm" loading={closing === p.id} onConfirm={() => close(p)} />
               </div>
             </li>
           );
@@ -87,11 +109,12 @@ export function PositionsList({
           <thead className="text-left text-xs text-muted">
             <tr className="border-b border-line">
               <th className="px-4 py-2.5 font-medium">Market</th>
-              <th className="px-4 py-2.5 font-medium text-right">Size</th>
-              <th className="px-4 py-2.5 font-medium text-right">Value</th>
-              <th className="px-4 py-2.5 font-medium text-right">Entry</th>
-              <th className="px-4 py-2.5 font-medium text-right">Mark</th>
-              <th className="px-4 py-2.5 font-medium text-right">Unrealized PnL</th>
+              <th className="px-4 py-2.5 text-right font-medium">Size</th>
+              <th className="px-4 py-2.5 text-right font-medium">Entry</th>
+              <th className="px-4 py-2.5 text-right font-medium">Mark</th>
+              <th className="px-4 py-2.5 text-right font-medium">Liq. price</th>
+              <th className="px-4 py-2.5 text-right font-medium">Margin</th>
+              <th className="px-4 py-2.5 text-right font-medium">PnL (ROE)</th>
               <th className="px-4 py-2.5" />
             </tr>
           </thead>
@@ -107,25 +130,28 @@ export function PositionsList({
                   className="cursor-pointer border-b border-line/60 last:border-0 hover:bg-panel-2/50"
                 >
                   <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5">
                       <span className="font-semibold">{baseAsset(p.symbol)}</span>
                       <SideBadge side={p.side} />
+                      <LevBadge leverage={p.leverage} />
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-right">{fmtQty(p.qty, info?.qtyDecimals)}</td>
-                  <td className="px-4 py-3 text-right">{fmtUsd(mark ? mark * p.qty : null)}</td>
+                  <td className="px-4 py-3 text-right">
+                    {fmtQty(p.qty, info?.qtyDecimals)}
+                    <div className="text-xs text-faint">{fmtUsd(mark ? mark * p.qty : null)}</div>
+                  </td>
                   <td className="px-4 py-3 text-right">{fmtPrice(p.avg_entry, info?.priceDecimals)}</td>
                   <td className="px-4 py-3 text-right">{fmtPrice(mark, info?.priceDecimals)}</td>
+                  <td className="px-4 py-3 text-right">
+                    <LiqCell p={p} mark={mark} decimals={info?.priceDecimals} />
+                  </td>
+                  <td className="px-4 py-3 text-right">{fmtUsd(p.margin)}</td>
                   <td className={cx("px-4 py-3 text-right font-semibold", pnlClass(pnl))}>
-                    {fmtSignedUsd(pnl)} <span className="text-xs font-normal">{fmtPct(pnlPct(p, mark))}</span>
+                    {fmtSignedUsd(pnl)}
+                    <div className="text-xs font-normal">{fmtPct(roePct(p, mark))}</div>
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <ConfirmButton
-                      label="Close"
-                      confirmLabel="Confirm"
-                      loading={closing === p.id}
-                      onConfirm={() => close(p)}
-                    />
+                    <ConfirmButton label="Close" confirmLabel="Confirm" loading={closing === p.id} onConfirm={() => close(p)} />
                   </td>
                 </tr>
               );
@@ -139,9 +165,9 @@ export function PositionsList({
 
 export function Stat({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div>
+    <div className="min-w-0">
       <div className="text-faint">{label}</div>
-      <div className="mt-0.5 text-fg">{value}</div>
+      <div className="mt-0.5 truncate text-fg">{value}</div>
     </div>
   );
 }

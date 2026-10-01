@@ -25,17 +25,23 @@ export interface Position {
   closed_qty: number;
   avg_entry: number;
   avg_exit: number | null;
-  realized_pnl: number;
+  realized_pnl: number; // gross price PnL, before fees
   status: "open" | "closed";
   opened_at: string;
   closed_at: string | null;
+  leverage: number;
+  margin: number; // isolated margin currently held
+  fees: number; // all fees paid (incl. liquidation fee)
+  liq_price: number | null; // 0/null = can't be liquidated
+  close_reason: "closed" | "liquidated" | null;
+  last_fill_at: string | null;
 }
 
 export interface Order {
   id: string;
   symbol: string;
   side: Side;
-  type: OrderType;
+  type: OrderType | "liquidation";
   qty: number;
   limit_price: number | null;
   status: "open" | "filled" | "cancelled";
@@ -43,6 +49,8 @@ export interface Order {
   cancel_reason: string | null;
   created_at: string;
   filled_at: string | null;
+  leverage: number;
+  fee: number;
 }
 
 export interface Fill {
@@ -54,6 +62,7 @@ export interface Fill {
   qty: number;
   price: number;
   realized_pnl: number;
+  fee: number;
   created_at: string;
 }
 

@@ -2,7 +2,7 @@
 
 import { createClient } from "./supabase/client";
 import { bumpData } from "./store";
-import type { Account, Order, OrderType, Side } from "./types";
+import type { Account, Order, OrderType, Position, Side } from "./types";
 
 const FRIENDLY: [RegExp, string][] = [
   [/insufficient balance/i, "Not enough balance for this order."],
@@ -11,6 +11,8 @@ const FRIENDLY: [RegExp, string][] = [
   [/order not open/i, "That order is no longer open."],
   [/position not open/i, "That position is already closed."],
   [/invalid amount/i, "Enter an amount other than zero."],
+  [/invalid leverage/i, "Leverage must be between 1x and 125x."],
+  [/Could not find the function|schema cache/i, "Database is out of date. Re-run supabase/schema.sql in the Supabase SQL Editor."],
   [/not authenticated|JWT/i, "Your session expired. Please sign in again."],
   [/Failed to fetch|NetworkError/i, "Network error. Check your connection and try again."],
 ];
@@ -32,7 +34,9 @@ export function placeOrder(a: {
   type: OrderType;
   qty: number;
   limitPrice?: number;
+  /** Always send the live price; a marketable limit order fills at it as taker. */
   marketPrice?: number;
+  leverage: number;
 }) {
   return rpc<Order>("place_order", {
     p_symbol: a.symbol,
@@ -41,7 +45,12 @@ export function placeOrder(a: {
     p_qty: a.qty,
     p_limit_price: a.limitPrice ?? null,
     p_market_price: a.marketPrice ?? null,
+    p_leverage: a.leverage,
   });
+}
+
+export function liquidatePosition(positionId: string, at?: string) {
+  return rpc<Position | null>("liquidate_position", { p_position_id: positionId, p_at: at ?? null });
 }
 
 export function fillLimitOrder(orderId: string, filledAt?: string) {

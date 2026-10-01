@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { fetchKlines, type Interval } from "@/lib/binance";
+import { findFirstCandle } from "@/lib/binance";
 import { fillLimitOrder } from "@/lib/actions";
 import { fmtPrice, fmtQty } from "@/lib/format";
 import { toast } from "@/lib/store";
@@ -52,19 +52,9 @@ export function useLimitMatcher() {
     for (const o of limits) {
       if (caughtUp.current.has(o.id)) continue;
       caughtUp.current.add(o.id);
-      catchUp(o).then((at) => at && fill(o, at)).catch(() => caughtUp.current.delete(o.id));
+      findFirstCandle(o.symbol, o.created_at, (c) => (o.side === "buy" ? c.low <= o.limit_price! : c.high >= o.limit_price!))
+        .then((at) => at && fill(o, at))
+        .catch(() => caughtUp.current.delete(o.id));
     }
   });
-}
-
-/** Returns the time the order would have filled, or null. */
-async function catchUp(o: Order): Promise<string | null> {
-  const start = new Date(o.created_at).getTime();
-  const ageMin = (Date.now() - start) / 60000;
-  if (ageMin < 1) return null;
-  // One request covers up to 1000 bars; pick the finest interval that reaches back far enough.
-  const interval: Interval = ageMin <= 1000 ? "1m" : ageMin <= 1000 * 60 ? "1h" : "1d";
-  const candles = await fetchKlines(o.symbol, interval, { startTime: start, limit: 1000 });
-  const hit = candles.find((c) => (o.side === "buy" ? c.low <= o.limit_price! : c.high >= o.limit_price!));
-  return hit ? new Date(Math.max(hit.time * 1000, start)).toISOString() : null;
 }

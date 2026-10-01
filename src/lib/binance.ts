@@ -43,6 +43,21 @@ export async function fetchKlines(
   return ((await res.json()) as RawKline[]).map(parseKline);
 }
 
+/**
+ * Replays candles since `sinceIso` and returns the time (ISO) of the first one
+ * matching `hit`, or null. One request: picks the finest interval (1m → 1h → 1d)
+ * whose 1000 bars reach back far enough. Used for offline limit fills and liquidations.
+ */
+export async function findFirstCandle(symbol: string, sinceIso: string, hit: (c: Candle) => boolean) {
+  const start = new Date(sinceIso).getTime();
+  const ageMin = (Date.now() - start) / 60000;
+  if (ageMin < 1) return null;
+  const interval: Interval = ageMin <= 1000 ? "1m" : ageMin <= 1000 * 60 ? "1h" : "1d";
+  const candles = await fetchKlines(symbol, interval, { startTime: start, limit: 1000 });
+  const c = candles.find(hit);
+  return c ? new Date(Math.max(c.time * 1000, start)).toISOString() : null;
+}
+
 export function parseWsKline(k: { t: number; o: string; h: string; l: string; c: string; v: string }): Candle {
   return { time: Math.floor(k.t / 1000), open: +k.o, high: +k.h, low: +k.l, close: +k.c, volume: +k.v };
 }

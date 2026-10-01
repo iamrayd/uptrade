@@ -78,6 +78,14 @@ export function SideBadge({ side }: { side: "long" | "short" | "buy" | "sell" })
   );
 }
 
+export function LiqBadge() {
+  return (
+    <span className="inline-flex items-center rounded bg-amber-400/15 px-1.5 py-0.5 text-[11px] font-bold uppercase tracking-wide text-amber-400">
+      Liquidated
+    </span>
+  );
+}
+
 export function Segmented<T extends string>({
   value,
   onChange,

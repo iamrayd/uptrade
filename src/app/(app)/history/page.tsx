@@ -6,12 +6,15 @@ import { useHistory } from "@/hooks/useTrading";
 import { useSymbolInfos } from "@/hooks/useMarket";
 import { baseAsset, fmtDateTime, fmtDuration, fmtPct, fmtPrice, fmtQty, fmtSignedUsd, pnlClass } from "@/lib/format";
 import type { HistoryRow } from "@/lib/types";
-import { ListSkeleton } from "@/components/PositionsList";
+import { LevBadge, ListSkeleton } from "@/components/PositionsList";
+import { LiqBadge } from "@/components/ui";
+import { netPnl, usedMargin } from "@/lib/pnl";
 import { Card, EmptyState, SideBadge, cx } from "@/components/ui";
 
+/** Net return on the margin committed (ROE). */
 const returnPct = (r: HistoryRow) => {
-  const cost = r.avg_entry * r.closed_qty;
-  return cost ? (r.realized_pnl / cost) * 100 : null;
+  const m = usedMargin(r);
+  return m ? (netPnl(r) / m) * 100 : null;
 };
 
 export default function HistoryPage() {
@@ -30,15 +33,15 @@ export default function HistoryPage() {
         (r) =>
           (symbol === "all" || r.symbol === symbol) &&
           (tag === "all" || r.journal?.tags.includes(tag)) &&
-          (outcome === "all" || (outcome === "win" ? r.realized_pnl > 0 : r.realized_pnl <= 0)),
+          (outcome === "all" || (outcome === "win" ? netPnl(r) > 0 : netPnl(r) <= 0)),
       ),
     [rows, symbol, tag, outcome],
   );
 
   const stats = useMemo(() => {
-    const wins = filtered.filter((r) => r.realized_pnl > 0);
-    const losses = filtered.filter((r) => r.realized_pnl <= 0);
-    const sum = (l: HistoryRow[]) => l.reduce((a, r) => a + Number(r.realized_pnl), 0);
+    const wins = filtered.filter((r) => netPnl(r) > 0);
+    const losses = filtered.filter((r) => netPnl(r) <= 0);
+    const sum = (l: HistoryRow[]) => l.reduce((a, r) => a + netPnl(r), 0);
     const grossWin = sum(wins);
     const grossLoss = Math.abs(sum(losses));
     return {
@@ -63,7 +66,7 @@ export default function HistoryPage() {
       </div>
 
       <Card className="num grid grid-cols-2 gap-4 p-4 sm:grid-cols-3 lg:grid-cols-6">
-        <Kpi label="Realized PnL" value={fmtSignedUsd(stats.total)} cls={pnlClass(stats.total)} />
+        <Kpi label="Net PnL" value={fmtSignedUsd(stats.total)} cls={pnlClass(stats.total)} />
         <Kpi label="Trades" value={String(stats.count)} />
         <Kpi label="Win rate" value={stats.winRate == null ? "—" : `${stats.winRate.toFixed(0)}%`} />
         <Kpi label="Avg win" value={fmtSignedUsd(stats.avgWin)} cls={pnlClass(stats.avgWin)} />
@@ -120,9 +123,11 @@ export default function HistoryPage() {
                         <div className="flex items-center gap-2">
                           <span className="font-semibold">{baseAsset(r.symbol)}</span>
                           <SideBadge side={r.side} />
+                          <LevBadge leverage={r.leverage} />
+                          {r.close_reason === "liquidated" && <LiqBadge />}
                         </div>
-                        <div className={cx("num font-semibold", pnlClass(r.realized_pnl))}>
-                          {fmtSignedUsd(r.realized_pnl)} <span className="text-xs font-normal">{fmtPct(returnPct(r))}</span>
+                        <div className={cx("num font-semibold", pnlClass(netPnl(r)))}>
+                          {fmtSignedUsd(netPnl(r))} <span className="text-xs font-normal">{fmtPct(returnPct(r))}</span>
                         </div>
                       </div>
                       <div className="num mt-2 flex justify-between text-xs text-muted">
@@ -146,7 +151,7 @@ export default function HistoryPage() {
                     <th className="px-4 py-2.5 font-medium text-right">Size</th>
                     <th className="px-4 py-2.5 font-medium text-right">Entry</th>
                     <th className="px-4 py-2.5 font-medium text-right">Exit</th>
-                    <th className="px-4 py-2.5 font-medium text-right">Realized PnL</th>
+                    <th className="px-4 py-2.5 font-medium text-right">Net PnL</th>
                     <th className="px-4 py-2.5 font-medium text-right">Held</th>
                     <th className="px-4 py-2.5 font-medium text-right">Closed</th>
                     <th className="px-4 py-2.5 font-medium">Journal</th>
@@ -161,13 +166,15 @@ export default function HistoryPage() {
                           <Link href={`/journal/${r.id}`} className="flex items-center gap-2">
                             <span className="font-semibold">{baseAsset(r.symbol)}</span>
                             <SideBadge side={r.side} />
+                          <LevBadge leverage={r.leverage} />
+                          {r.close_reason === "liquidated" && <LiqBadge />}
                           </Link>
                         </td>
                         <td className="px-4 py-3 text-right">{fmtQty(r.entry_qty, info?.qtyDecimals)}</td>
                         <td className="px-4 py-3 text-right">{fmtPrice(r.avg_entry, info?.priceDecimals)}</td>
                         <td className="px-4 py-3 text-right">{fmtPrice(r.avg_exit, info?.priceDecimals)}</td>
-                        <td className={cx("px-4 py-3 text-right font-semibold", pnlClass(r.realized_pnl))}>
-                          {fmtSignedUsd(r.realized_pnl)} <span className="text-xs font-normal">{fmtPct(returnPct(r))}</span>
+                        <td className={cx("px-4 py-3 text-right font-semibold", pnlClass(netPnl(r)))}>
+                          {fmtSignedUsd(netPnl(r))} <span className="text-xs font-normal">{fmtPct(returnPct(r))}</span>
                         </td>
                         <td className="px-4 py-3 text-right text-muted">{fmtDuration(r.opened_at, r.closed_at)}</td>
                         <td className="px-4 py-3 text-right text-muted">{fmtDateTime(r.closed_at)}</td>

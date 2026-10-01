@@ -6,7 +6,7 @@ import { cancelOrder } from "@/lib/actions";
 import { baseAsset, fmtDateTime, fmtPct, fmtPrice, fmtQty } from "@/lib/format";
 import { toast } from "@/lib/store";
 import type { Order } from "@/lib/types";
-import { ListSkeleton, Stat } from "./PositionsList";
+import { LevBadge, ListSkeleton, Stat } from "./PositionsList";
 import { Button, EmptyState, SideBadge } from "./ui";
 
 export function OrdersList({
@@ -56,6 +56,7 @@ export function OrdersList({
                 <div className="flex items-center gap-2">
                   <span className="font-semibold">{baseAsset(o.symbol)}</span>
                   <SideBadge side={o.side} />
+                  <LevBadge leverage={o.leverage} />
                   <span className="text-xs text-muted">Limit</span>
                 </div>
                 <span className="text-xs text-faint">{fmtDateTime(o.created_at)}</span>
@@ -82,7 +83,7 @@ export function OrdersList({
               <th className="px-4 py-2.5 font-medium">Market</th>
               <th className="px-4 py-2.5 font-medium text-right">Limit price</th>
               <th className="px-4 py-2.5 font-medium text-right">Size</th>
-              <th className="px-4 py-2.5 font-medium text-right">Value</th>
+              <th className="px-4 py-2.5 font-medium text-right">Margin</th>
               <th className="px-4 py-2.5 font-medium text-right">From last</th>
               <th className="px-4 py-2.5 font-medium text-right">Placed</th>
               <th className="px-4 py-2.5" />
@@ -101,11 +102,12 @@ export function OrdersList({
                     <div className="flex items-center gap-2">
                       <span className="font-semibold">{baseAsset(o.symbol)}</span>
                       <SideBadge side={o.side} />
+                  <LevBadge leverage={o.leverage} />
                     </div>
                   </td>
                   <td className="px-4 py-3 text-right">{fmtPrice(o.limit_price, info?.priceDecimals)}</td>
                   <td className="px-4 py-3 text-right">{fmtQty(o.qty, info?.qtyDecimals)}</td>
-                  <td className="px-4 py-3 text-right">${((o.limit_price ?? 0) * o.qty).toFixed(2)}</td>
+                  <td className="px-4 py-3 text-right">${(((o.limit_price ?? 0) * o.qty) / o.leverage).toFixed(2)}</td>
                   <td className="px-4 py-3 text-right text-muted">{fmtPct(distance(o))}</td>
                   <td className="px-4 py-3 text-right text-muted">{fmtDateTime(o.created_at)}</td>
                   <td className="px-4 py-3 text-right">

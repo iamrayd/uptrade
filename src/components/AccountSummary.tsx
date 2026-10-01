@@ -18,7 +18,7 @@ export function AccountSummary({
     ? [
         { label: "Equity", value: fmtUsd(summary.equity), strong: true },
         { label: "Available", value: fmtUsd(summary.balance) },
-        { label: "In positions", value: fmtUsd(summary.inPositions) },
+        { label: "Margin in use", value: fmtUsd(summary.margin) },
         { label: "Unrealized", value: fmtSignedUsd(summary.unrealized), cls: pnlClass(summary.unrealized) },
       ]
     : null;

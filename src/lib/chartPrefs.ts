@@ -30,6 +30,44 @@ export function setIndicators(next: IndicatorConfig) {
   listeners.forEach((l) => l());
 }
 
+// ── Last-used leverage (per device) ──
+
+const LEV_KEY = "uptrade:leverage";
+const levListeners = new Set<() => void>();
+let levCached: number | null = null;
+
+function readLev() {
+  if (levCached != null) return levCached;
+  try {
+    const n = Number(localStorage.getItem(LEV_KEY));
+    levCached = Number.isInteger(n) && n >= 1 && n <= 125 ? n : 10;
+  } catch {
+    levCached = 10;
+  }
+  return levCached;
+}
+
+export function setLeverage(n: number) {
+  levCached = Math.min(125, Math.max(1, Math.round(n)));
+  try {
+    localStorage.setItem(LEV_KEY, String(levCached));
+  } catch {
+    /* ignore */
+  }
+  levListeners.forEach((l) => l());
+}
+
+export function useLeverage() {
+  return useSyncExternalStore(
+    (l) => {
+      levListeners.add(l);
+      return () => levListeners.delete(l);
+    },
+    readLev,
+    () => 10,
+  );
+}
+
 export function useIndicators() {
   return useSyncExternalStore(
     (l) => {
