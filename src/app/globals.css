@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-bg: #0b0e13;
+  --color-panel: #12161d;
+  --color-panel-2: #181d26;
+  --color-line: #232a35;
+  --color-fg: #e7eaf0;
+  --color-muted: #8b95a5;
+  --color-faint: #5c6675;
+  --color-up: #16c784;
+  --color-up-soft: rgb(22 199 132 / 0.12);
+  --color-down: #ea3943;
+  --color-down-soft: rgb(234 57 67 / 0.12);
+  --color-accent: #6d8cff;
+  --color-accent-soft: rgb(109 140 255 / 0.14);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+}
+
+body {
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* Numbers never jiggle as they tick. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hide number spinners. */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-sheet-in {
+  animation: sheet-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.animate-fade-in {
+  animation: fade-in 0.18s ease-out;
+}
+.animate-toast-in {
+  animation: toast-in 0.2s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-sheet-in,
+  .animate-fade-in,
+  .animate-toast-in {
+    animation: none;
+  }
+}
