@@ -4,7 +4,7 @@ import { useState } from "react";
 import type { SymbolInfo } from "@/lib/binance";
 import { closePosition } from "@/lib/actions";
 import { baseAsset, fmtDuration, fmtPct, fmtPrice, fmtQty, fmtSignedUsd, fmtUsd, pnlClass } from "@/lib/format";
-import { TAKER_FEE, distanceToLiq, roePct, unrealizedPnl } from "@/lib/pnl";
+import { TAKER_FEE, distanceToLiq, liqTick, roePct, unrealizedPnl } from "@/lib/pnl";
 import { toast } from "@/lib/store";
 import type { Position } from "@/lib/types";
 import { ConfirmButton, EmptyState, SideBadge, Skeleton, cx } from "./ui";
@@ -22,12 +22,12 @@ export function LevBadge({ leverage }: { leverage: number }) {
   );
 }
 
-function LiqCell({ p, mark, decimals }: { p: Position; mark: number | undefined; decimals?: number }) {
+function LiqCell({ p, mark, info }: { p: Position; mark: number | undefined; info?: SymbolInfo }) {
   if (!p.liq_price) return <span className="text-faint">None</span>;
   const d = distanceToLiq(p, mark);
   return (
     <span className="text-amber-400">
-      {fmtPrice(p.liq_price, decimals)}
+      {fmtPrice(info ? liqTick(p.side, p.liq_price, info.tickSize) : p.liq_price, info?.priceDecimals)}
       {d != null && <span className={cx("ml-1 text-xs", d < 2 ? "text-down" : "text-faint")}>{d.toFixed(1)}%</span>}
     </span>
   );
@@ -92,7 +92,7 @@ export function PositionsList({
                 <Stat label="Entry" value={fmtPrice(p.avg_entry, info?.priceDecimals)} />
                 <Stat label="Mark" value={fmtPrice(mark, info?.priceDecimals)} />
                 <Stat label="Margin" value={fmtUsd(p.margin)} />
-                <Stat label="Liq. price" value={<LiqCell p={p} mark={mark} decimals={info?.priceDecimals} />} />
+                <Stat label="Liq. price" value={<LiqCell p={p} mark={mark} info={info} />} />
                 <Stat label="Open" value={fmtDuration(p.opened_at, null)} />
               </div>
               <div className="mt-3 flex justify-end">
@@ -143,7 +143,7 @@ export function PositionsList({
                   <td className="px-4 py-3 text-right">{fmtPrice(p.avg_entry, info?.priceDecimals)}</td>
                   <td className="px-4 py-3 text-right">{fmtPrice(mark, info?.priceDecimals)}</td>
                   <td className="px-4 py-3 text-right">
-                    <LiqCell p={p} mark={mark} decimals={info?.priceDecimals} />
+                    <LiqCell p={p} mark={mark} info={info} />
                   </td>
                   <td className="px-4 py-3 text-right">{fmtUsd(p.margin)}</td>
                   <td className={cx("px-4 py-3 text-right font-semibold", pnlClass(pnl))}>

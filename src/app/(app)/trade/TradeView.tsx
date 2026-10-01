@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { INTERVALS, MARKET_COOKIE, type Interval } from "@/lib/binance";
 import { baseAsset, fmtPrice, fmtQty } from "@/lib/format";
-import { summarizeEquity } from "@/lib/pnl";
+import { liqTick, summarizeEquity } from "@/lib/pnl";
 import type { Side } from "@/lib/types";
 import { useAccount, useOpenOrders, useOpenPositions } from "@/hooks/useTrading";
 import { useKlines, usePrices, useSymbolInfo, useSymbolInfos } from "@/hooks/useMarket";
@@ -59,7 +59,7 @@ export function TradeView({ initialSymbol, initialInterval }: { initialSymbol: s
         title: `${position.side === "long" ? "Long" : "Short"} ${position.leverage}x ${fmtQty(position.qty, info.qtyDecimals)}`,
       });
       if (position.liq_price && position.liq_price > 0)
-        out.push({ price: position.liq_price, color: "#f59e0b", title: "Liq.", dashed: true });
+        out.push({ price: liqTick(position.side, position.liq_price, info.tickSize)!, color: "#f59e0b", title: "Liq.", dashed: true });
     }
     (orders ?? [])
       .filter((o) => o.symbol === symbol && o.limit_price)
@@ -72,7 +72,7 @@ export function TradeView({ initialSymbol, initialInterval }: { initialSymbol: s
         }),
       );
     return out;
-  }, [position, orders, symbol, info.qtyDecimals]);
+  }, [position, orders, symbol, info.qtyDecimals, info.tickSize]);
 
   const selectSymbol = useCallback((s: string) => {
     setSymbol(s);

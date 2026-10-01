@@ -12,6 +12,17 @@ export function liqPrice(side: PositionSide, entry: number, qty: number, margin:
   return side === "long" ? Math.max((entry - margin / qty) / (1 - MMR), 0) : (entry + margin / qty) / (1 + MMR);
 }
 
+/**
+ * The first exchange tick at which liquidation actually triggers: round a long's
+ * liq price DOWN and a short's UP to the tick size. (Rounding to nearest could
+ * show a price that doesn't liquidate.)
+ */
+export function liqTick(side: PositionSide, liq: number | null | undefined, tickSize: number) {
+  if (!liq || liq <= 0) return null;
+  const steps = liq / tickSize;
+  return (side === "long" ? Math.floor(steps + 1e-9) : Math.ceil(steps - 1e-9)) * tickSize;
+}
+
 export function unrealizedPnl(p: Pick<Position, "side" | "qty" | "avg_entry">, mark: number | undefined) {
   if (mark == null) return null;
   return p.side === "long" ? (mark - p.avg_entry) * p.qty : (p.avg_entry - mark) * p.qty;

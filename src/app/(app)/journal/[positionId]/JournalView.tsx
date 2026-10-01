@@ -9,7 +9,7 @@ import { unwrap, useQuery } from "@/hooks/useQuery";
 import { useSymbolInfo } from "@/hooks/useMarket";
 import { Chart } from "@/components/Chart";
 import { LevBadge } from "@/components/PositionsList";
-import { netPnl, usedMargin } from "@/lib/pnl";
+import { liqTick, netPnl, usedMargin } from "@/lib/pnl";
 import { IndicatorLegend } from "@/components/IndicatorsMenu";
 import { useIndicators } from "@/lib/chartPrefs";
 import { JournalEditor } from "@/components/JournalEditor";
@@ -105,7 +105,7 @@ function TradeSummary({ position: p }: { position: Position }) {
         <Item label={`Margin (${p.leverage}x)`} value={fmtUsd(margin)} />
         <Item label="Price PnL" value={fmtSignedUsd(p.realized_pnl)} />
         <Item label={p.close_reason === "liquidated" ? "Fees incl. liquidation" : "Fees"} value={fmtUsd(p.fees)} />
-        <Item label="Liq. price" value={p.liq_price ? fmtPrice(p.liq_price, info.priceDecimals) : "None"} />
+        <Item label="Liq. price" value={p.liq_price ? fmtPrice(liqTick(p.side, p.liq_price, info.tickSize), info.priceDecimals) : "None"} />
         <Item label="Opened" value={fmtDateTime(p.opened_at)} />
         <Item label="Closed" value={fmtDateTime(p.closed_at)} />
         <Item label="Held" value={fmtDuration(p.opened_at, p.closed_at)} />

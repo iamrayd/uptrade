@@ -5,7 +5,7 @@ import type { SymbolInfo } from "@/lib/binance";
 import { placeOrder } from "@/lib/actions";
 import { setLeverage, useLeverage } from "@/lib/chartPrefs";
 import { floorToStep, fmtPrice, fmtQty, fmtSignedUsd, fmtUsd, pnlClass } from "@/lib/format";
-import { MAKER_FEE, MAX_LEVERAGE, TAKER_FEE, previewFill } from "@/lib/pnl";
+import { MAKER_FEE, MAX_LEVERAGE, TAKER_FEE, liqTick, previewFill } from "@/lib/pnl";
 import { toast } from "@/lib/store";
 import type { OrderType, Position, Side } from "@/lib/types";
 import { Button, Segmented, cx } from "./ui";
@@ -114,6 +114,15 @@ export function OrderPanel({
     } finally {
       setBusy(false);
     }
+  }
+
+  function submitLabel() {
+    const prefix = type === "limit" && !marketable ? "Place limit " : "";
+    // Purely reducing an opposite position: leverage doesn't apply.
+    if (preview && preview.closeQty > 0 && preview.openQty <= 1e-12) {
+      return `${prefix}${side === "buy" ? "Buy" : "Sell"} ${base} · close ${preview.closingSide}`;
+    }
+    return `${prefix}${side === "buy" ? "Buy / Long" : "Sell / Short"} ${base} · ${lev}x`;
   }
 
   const inputCls =
@@ -265,7 +274,9 @@ export function OrderPanel({
         {preview?.resulting && (
           <Row label="Est. liquidation price">
             <span className="text-amber-400">
-              {preview.resulting.liq ? fmtPrice(preview.resulting.liq, info.priceDecimals) : "None"}
+              {preview.resulting.liq
+                ? fmtPrice(liqTick(preview.resulting.side, preview.resulting.liq, info.tickSize), info.priceDecimals)
+                : "None"}
             </span>
           </Row>
         )}
@@ -279,7 +290,7 @@ export function OrderPanel({
         disabled={!!problem}
         onClick={submit}
       >
-        {problem ?? `${type === "limit" && !marketable ? "Place limit " : ""}${side === "buy" ? "Buy / Long" : "Sell / Short"} ${base} · ${lev}x`}
+        {problem ?? submitLabel()}
       </Button>
       {type === "limit" && !marketable && (
         <p className="text-center text-xs text-faint">
