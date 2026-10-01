@@ -13,6 +13,8 @@ import { OrderPanel } from "@/components/OrderPanel";
 import { OrdersList } from "@/components/OrdersList";
 import { PositionsList } from "@/components/PositionsList";
 import { SymbolPicker } from "@/components/SymbolPicker";
+import { IndicatorLegend, IndicatorsMenu } from "@/components/IndicatorsMenu";
+import { useIndicators } from "@/lib/chartPrefs";
 import { Button, Card, LiveDot, Sheet, Skeleton, cx } from "@/components/ui";
 
 export function TradeView({ initialSymbol, initialInterval }: { initialSymbol: string; initialInterval: Interval }) {
@@ -29,6 +31,9 @@ export function TradeView({ initialSymbol, initialInterval }: { initialSymbol: s
   }, [symbol, interval]);
 
   const info = useSymbolInfo(symbol);
+  const indicators = useIndicators();
+  const [indOpen, setIndOpen] = useState(false);
+  const extraPanes = Number(indicators.rsi.on) + Number(indicators.macd.on);
   const { history, last, error: chartError, status } = useKlines(symbol, interval);
   const { data: account } = useAccount();
   const { data: positions, loading: posLoading } = useOpenPositions();
@@ -91,6 +96,15 @@ export function TradeView({ initialSymbol, initialInterval }: { initialSymbol: s
               </button>
               <div className="num text-lg font-semibold">{price ? fmtPrice(price, info.priceDecimals) : <Skeleton className="h-6 w-24" />}</div>
               <LiveDot status={status} />
+              <button
+                onClick={() => setIndOpen(true)}
+                className="flex h-9 items-center gap-1.5 rounded-md border border-line px-2.5 text-sm font-medium text-muted hover:bg-panel-2 hover:text-fg"
+              >
+                <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M3 17l5-6 4 4 8-9" />
+                </svg>
+                Indicators
+              </button>
               <div className="scrollbar-none -mx-1 ml-auto flex w-full overflow-x-auto sm:w-auto">
                 {INTERVALS.map((tf) => (
                   <button
@@ -106,8 +120,17 @@ export function TradeView({ initialSymbol, initialInterval }: { initialSymbol: s
                 ))}
               </div>
             </div>
-            <div className="relative h-[45dvh] min-h-[280px] lg:h-[540px]">
+            <div
+              className={cx(
+                "relative min-h-[280px]",
+                extraPanes === 0 && "h-[45dvh] lg:h-[540px]",
+                extraPanes === 1 && "h-[56dvh] lg:h-[640px]",
+                extraPanes === 2 && "h-[66dvh] lg:h-[740px]",
+              )}
+            >
+              <IndicatorLegend cfg={indicators} />
               <Chart
+                indicators={indicators}
                 history={history}
                 last={last}
                 priceDecimals={info.priceDecimals}
@@ -220,6 +243,7 @@ export function TradeView({ initialSymbol, initialInterval }: { initialSymbol: s
       </Sheet>
 
       <SymbolPicker open={pickerOpen} onClose={() => setPickerOpen(false)} current={symbol} onSelect={selectSymbol} />
+      <IndicatorsMenu open={indOpen} onClose={() => setIndOpen(false)} cfg={indicators} />
     </div>
   );
 }

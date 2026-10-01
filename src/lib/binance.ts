@@ -25,10 +25,10 @@ export const POPULAR_SYMBOLS = [
 export const DEFAULT_SYMBOL = "BTCUSDT";
 export const MARKET_COOKIE = "uptrade_market";
 
-type RawKline = [number, string, string, string, string, ...unknown[]];
+type RawKline = [number, string, string, string, string, string, ...unknown[]];
 
 function parseKline(k: RawKline): Candle {
-  return { time: Math.floor(k[0] / 1000), open: +k[1], high: +k[2], low: +k[3], close: +k[4] };
+  return { time: Math.floor(k[0] / 1000), open: +k[1], high: +k[2], low: +k[3], close: +k[4], volume: +k[5] };
 }
 
 export async function fetchKlines(
@@ -43,8 +43,8 @@ export async function fetchKlines(
   return ((await res.json()) as RawKline[]).map(parseKline);
 }
 
-export function parseWsKline(k: { t: number; o: string; h: string; l: string; c: string }): Candle {
-  return { time: Math.floor(k.t / 1000), open: +k.o, high: +k.h, low: +k.l, close: +k.c };
+export function parseWsKline(k: { t: number; o: string; h: string; l: string; c: string; v: string }): Candle {
+  return { time: Math.floor(k.t / 1000), open: +k.o, high: +k.h, low: +k.l, close: +k.c, volume: +k.v };
 }
 
 // ── Symbol metadata (tick/step sizes for formatting and qty rounding) ──

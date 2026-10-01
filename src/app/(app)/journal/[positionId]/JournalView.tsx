@@ -8,6 +8,8 @@ import type { Candle, Fill, JournalEntry, Position } from "@/lib/types";
 import { unwrap, useQuery } from "@/hooks/useQuery";
 import { useSymbolInfo } from "@/hooks/useMarket";
 import { Chart } from "@/components/Chart";
+import { IndicatorLegend } from "@/components/IndicatorsMenu";
+import { useIndicators } from "@/lib/chartPrefs";
 import { JournalEditor } from "@/components/JournalEditor";
 import { Card, EmptyState, SideBadge, Skeleton, cx } from "@/components/ui";
 
@@ -115,6 +117,7 @@ function Item({ label, value }: { label: string; value: string }) {
 /** Candles covering the trade with entry/exit lines, at a resolution that fits. */
 function TradeChart({ position: p }: { position: Position }) {
   const info = useSymbolInfo(p.symbol);
+  const indicators = useIndicators();
   const [candles, setCandles] = useState<Candle[] | null>(null);
 
   useEffect(() => {
@@ -142,7 +145,8 @@ function TradeChart({ position: p }: { position: Position }) {
   return (
     <Card className="overflow-hidden">
       <div className="relative h-64 sm:h-80">
-        <Chart fit history={candles} last={null} priceDecimals={info.priceDecimals} tickSize={info.tickSize} lines={lines} />
+        <IndicatorLegend cfg={indicators} />
+        <Chart fit indicators={indicators} history={candles} last={null} priceDecimals={info.priceDecimals} tickSize={info.tickSize} lines={lines} />
         {!candles && (
           <div className="absolute inset-0 grid place-items-center">
             <Skeleton className="h-3/4 w-11/12" />

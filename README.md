@@ -11,6 +11,27 @@ A personal crypto paper-trading app and trade journal. It uses live Binance pric
 
 Stack: Next.js 16 (App Router), Tailwind v4, Supabase (Auth, Postgres, Storage), TradingView Lightweight Charts, and Binance public market data (no API key needed).
 
+## Market data: why Binance and not MEXC
+
+I mostly trade on MEXC, but **MEXC is blocked in our region**. Its API (`api.mexc.com`) doesn't resolve without a VPN, so a browser app can't call it. The workarounds were either to relay MEXC data through a Vercel server, polling every few seconds instead of streaming, which eats into the free tier, or to build a protobuf WebSocket decoder. Neither seemed worth it for a paper-trading journal.
+
+So UpTrade uses **Binance's public market-data servers** (`data-api.binance.vision`, `data-stream.binance.vision`), which are reachable here and need no account or key. What this means in practice:
+
+- Most large coins trade on both exchanges at nearly the same price, so paper results are a close stand-in.
+- Coins listed **only** on MEXC aren't available.
+- Small price gaps between exchanges are normal.
+
+The same note appears in the app, in the market picker and under Account → Market data.
+
+## Chart indicators
+
+Open **Indicators** on the Trade chart. Your choices are saved on each device and also apply to the chart on each journaled trade.
+
+- **Overlays:** Volume, three moving averages (EMA or SMA with any length), Bollinger Bands, and VWAP (resets daily at 00:00 UTC)
+- **Panes:** RSI (Wilder) and MACD
+
+All of them are calculated in the browser (`src/lib/indicators.ts`) and update with each live candle.
+
 ## Setup
 
 ### 1. Supabase (free)

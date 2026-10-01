@@ -10,6 +10,7 @@ import { createClient } from "@/lib/supabase/client";
 import { useAccount, useAdjustments, useOpenPositions, useUser } from "@/hooks/useTrading";
 import { usePrices } from "@/hooks/useMarket";
 import { AccountSummary } from "@/components/AccountSummary";
+import { DataSourceNote } from "@/components/DataSourceNote";
 import { ListSkeleton } from "@/components/PositionsList";
 import { Button, Card, EmptyState, Segmented, cx } from "@/components/ui";
 
@@ -156,6 +157,11 @@ export default function AccountPage() {
           )}
         </Card>
       </div>
+
+      <Card className="p-4">
+        <h2 className="mb-3 text-base font-semibold">Market data</h2>
+        <DataSourceNote detailed />
+      </Card>
 
       <Card className="flex items-center justify-between p-4">
         <div>

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { POPULAR_SYMBOLS, fetch24h, lookupSymbol, type Ticker24h } from "@/lib/binance";
 import { baseAsset, fmtPct, pnlClass } from "@/lib/format";
+import { DataSourceNote } from "./DataSourceNote";
 import { Sheet, Spinner, cx } from "./ui";
 
 export function SymbolPicker({
@@ -65,6 +66,7 @@ export function SymbolPicker({
           autoCorrect="off"
         />
       </form>
+      <DataSourceNote className="mx-3 mt-3" />
       <ul className="p-2">
         {list.map((s) => {
           const t = stats[s];
