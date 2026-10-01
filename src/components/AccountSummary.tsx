@@ -4,7 +4,16 @@ import { fmtSignedUsd, fmtUsd, pnlClass } from "@/lib/format";
 import type { EquitySummary } from "@/lib/pnl";
 import { Skeleton, cx } from "./ui";
 
-export function AccountSummary({ summary, className }: { summary: EquitySummary | null; className?: string }) {
+export function AccountSummary({
+  summary,
+  compact,
+  className,
+}: {
+  summary: EquitySummary | null;
+  /** Always 2 columns (narrow sidebars). */
+  compact?: boolean;
+  className?: string;
+}) {
   const items = summary
     ? [
         { label: "Equity", value: fmtUsd(summary.equity), strong: true },
@@ -14,7 +23,7 @@ export function AccountSummary({ summary, className }: { summary: EquitySummary 
       ]
     : null;
   return (
-    <div className={cx("num grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4", className)}>
+    <div className={cx("num grid grid-cols-2 gap-x-4 gap-y-3", !compact && "sm:grid-cols-4", className)}>
       {items
         ? items.map((i) => (
             <div key={i.label} className="min-w-0">

@@ -124,7 +124,8 @@ function TradeChart({ position: p }: { position: Position }) {
     const open = new Date(p.opened_at).getTime();
     const close = p.closed_at ? new Date(p.closed_at).getTime() : Date.now();
     const span = Math.max(close - open, 60_000);
-    const pad = span * 0.6;
+    // Show context around the trade: at least ~45 minutes on each side, even for quick scalps.
+    const pad = Math.max(span * 0.6, 45 * 60_000);
     const want = (span + 2 * pad) / 1000;
     const interval: Interval = INTERVALS.find((i) => want / INTERVAL_SECONDS[i] <= 400) ?? "1d";
     const ctrl = new AbortController();

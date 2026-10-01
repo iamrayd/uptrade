@@ -194,7 +194,7 @@ export function TradeView({ initialSymbol, initialInterval }: { initialSymbol: s
         <aside className="hidden lg:col-span-4 lg:block xl:col-span-3">
           <div className="sticky top-[4.5rem] space-y-4">
             <Card className="p-4">
-              <AccountSummary summary={summary} className="sm:grid-cols-2" />
+              <AccountSummary summary={summary} compact />
             </Card>
             <Card className="p-4">
               <OrderPanel key={symbol} info={info} price={price} balance={account?.balance} position={position} />
