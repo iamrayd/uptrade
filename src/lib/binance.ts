@@ -4,13 +4,14 @@ import type { Candle } from "./types";
 export const BINANCE_REST = "https://data-api.binance.vision/api/v3";
 export const BINANCE_WS = "wss://data-stream.binance.vision";
 
-export const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
+export const INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"] as const;
 export type Interval = (typeof INTERVALS)[number];
 
 export const INTERVAL_SECONDS: Record<Interval, number> = {
   "1m": 60,
   "5m": 300,
   "15m": 900,
+  "30m": 1800,
   "1h": 3600,
   "4h": 14400,
   "1d": 86400,

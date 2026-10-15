@@ -20,6 +20,11 @@ const TABS = [
     icon: <path d="M12 8v4l3 2M3 12a9 9 0 1 0 3-6.7M3 4v4h4" />,
   },
   {
+    href: "/bots",
+    label: "Bots",
+    icon: <path d="M12 4v3m-5 4h10a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2Zm2 4h.01M15 15h.01M3 15v2m18-2v2" />,
+  },
+  {
     href: "/account",
     label: "Account",
     icon: <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8a7 7 0 0 1 14 0" />,
@@ -88,7 +93,7 @@ export function BottomTabs() {
   const path = usePathname();
   return (
     <nav className="pb-safe fixed inset-x-0 bottom-0 z-40 border-t border-line bg-bg/95 backdrop-blur lg:hidden">
-      <div className="grid h-16 grid-cols-3">
+      <div className="grid h-16 grid-cols-4">
         {TABS.map((t) => {
           const active = isActive(path, t.href);
           return (
