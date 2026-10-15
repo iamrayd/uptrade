@@ -87,3 +87,91 @@ export interface Candle {
   close: number;
   volume: number; // base asset
 }
+
+// ── Strategy bots (supabase/bot.sql) ──
+
+export type BotExitReason = "stop_loss" | "trailing_stop" | "take_profit" | "signal" | "time_exit" | "liquidation";
+
+export interface BotSettings {
+  user_id: string;
+  enabled: boolean;
+  start_balance: number;
+  risk_pct: number;
+  max_leverage: number;
+  created_at: string;
+}
+
+export interface BotStrategy {
+  key: string;
+  name: string;
+  version: number;
+  summary: string;
+  rules: string;
+  params: Record<string, number>;
+}
+
+export interface BotAccount {
+  id: string;
+  strategy: string;
+  timeframe: string;
+  balance: number; // free cash, excludes margin in open trades
+  start_balance: number;
+  status: "active" | "busted";
+  created_at: string;
+}
+
+export interface BotTrade {
+  id: string;
+  account_id: string;
+  strategy: string;
+  timeframe: string;
+  symbol: string;
+  side: PositionSide;
+  status: "open" | "closed";
+  qty: number;
+  entry_price: number;
+  leverage: number;
+  margin: number;
+  liq_price: number;
+  initial_stop: number;
+  stop_price: number;
+  take_profit: number | null;
+  risk_usd: number;
+  risk_pct: number;
+  entry_fee: number;
+  signal_bar_time: string;
+  opened_at: string;
+  entry_reason: string;
+  entry_indicators: Record<string, number>;
+  sizing_notes: string[];
+  trailed: boolean;
+  stop_history: { at: string; from: number; to: number; note: string }[];
+  mfe_price: number | null;
+  mae_price: number | null;
+  exit_price: number | null;
+  exit_fee: number | null;
+  closed_at: string | null;
+  exit_reason: BotExitReason | null;
+  exit_note: string | null;
+  realized_pnl: number | null;
+  net_pnl: number | null;
+  r_multiple: number | null;
+}
+
+export interface BotEvent {
+  id: number;
+  account_id: string | null;
+  trade_id: string | null;
+  symbol: string | null;
+  timeframe: string | null;
+  kind: string;
+  message: string;
+  created_at: string;
+}
+
+export interface BotRuntime {
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  last_error: string | null;
+  runs: number;
+}

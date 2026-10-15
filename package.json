@@ -6,7 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck:bot": "tsc -p tsconfig.bot.json",
+    "test:bot": "node --test \"scripts/test/*.test.ts\"",
+    "backtest": "node scripts/backtest.ts",
+    "docs:strategies": "node scripts/gen-strategy-docs.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",
@@ -17,6 +21,7 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.3.16",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

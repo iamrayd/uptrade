@@ -2,12 +2,13 @@
 
 A personal crypto paper-trading app and trade journal. It uses live Binance prices, runs on free tiers only, and works on desktop and phone.
 
-- **Live chart:** candlesticks from Binance (1m–1d), with your entry price and limit-order lines drawn on it.
+- **Live chart:** candlesticks from Binance (1m–1d, including 30m), with your entry price and limit-order lines drawn on it.
 - **Orders:** market and limit, long and short, 1–125x isolated leverage with MEXC-style fees and liquidations.
 - **Positions:** live unrealized PnL. Closing a position takes two taps.
 - **History:** closed trades with realized PnL, win rate, profit factor, and filters by market, setup tag and outcome.
 - **Journal:** notes, setup tags, a 1–5 execution rating, and screenshots for each trade, shown next to a chart of the trade.
 - **Balance:** starts at $1,000. You can add or deduct funds at any time, and every change is logged.
+- **Strategy bots:** 5 crypto strategies × 6 timeframes (5m–1d), each in its own $100 paper account, trading BTC/ETH/SOL around the clock from a Supabase cron job. Every trade is journaled: why it entered, the indicator readings, the sizing and risk plan, every stop move, and why it exited. See [docs/strategies](docs/strategies/README.md) and the one-time [setup](docs/strategies/SETUP.md).
 
 Stack: Next.js 16 (App Router), Tailwind v4, Supabase (Auth, Postgres, Storage), TradingView Lightweight Charts, and Binance public market data (no API key needed).
 
