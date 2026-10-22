@@ -191,8 +191,29 @@ function StopMoves({ moves, dp }: { moves: BotTrade["stop_history"]; dp: number 
   );
 }
 
-/** A one-line read of what the trade tells us, derived from the numbers (no guessing). */
+/** The hourly analysis's post-mortem, or until then a one-line read derived from the numbers. */
 function Lesson({ t }: { t: BotTrade }) {
+  const rv = t.review;
+  if (rv)
+    return (
+      <div className="mt-3 rounded-lg bg-panel-2 px-3 py-2 text-xs text-muted">
+        <div className="font-semibold text-fg">Review: {rv.title}</div>
+        <p className="mt-1">{rv.why}</p>
+        {rv.flags.length > 0 && (
+          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-amber-400">
+            {rv.flags.map((f, i) => (
+              <li key={i}>{f}</li>
+            ))}
+          </ul>
+        )}
+        {rv.outcome === "loss" && <p className="mt-1">Fix: {rv.fix}</p>}
+        {rv.afterExitR != null && (
+          <p className="mt-1 text-faint">
+            After the exit, price reached {fmtR(rv.afterExitR)} from the entry within {rv.afterExitBars} bars.
+          </p>
+        )}
+      </div>
+    );
   const mfeR = priceToR(t, t.mfe_price);
   const r = t.r_multiple ?? 0;
   let text: string;

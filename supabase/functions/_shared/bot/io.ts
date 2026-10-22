@@ -92,10 +92,35 @@ export interface TradeRow {
   mae_price: number | null;
 }
 
+/** An active lesson: skip entries that match its rule (see analysis.ts). */
+export interface LessonRow {
+  id: string;
+  user_id: string;
+  strategy: string;
+  timeframe: string | null;
+  feature: string;
+  op: "lt" | "gte" | "eq";
+  value: number | string;
+  title: string;
+}
+
 export interface BotState {
   accounts: AccountRow[];
   open_trades: TradeRow[];
   cursors: Record<string, string>;
+  lessons?: LessonRow[];
+}
+
+export interface FilteredSignalInput {
+  account_id: string;
+  lesson_ids: string[];
+  symbol: string;
+  side: "long" | "short";
+  entry_price: number;
+  stop_price: number;
+  take_profit: number | null;
+  signal_bar_time: string;
+  features: Record<string, number | string>;
 }
 
 export interface EventRow {
@@ -160,10 +185,89 @@ export interface Db {
   } | null>;
   updateTrades(u: TradeUpdate[]): Promise<void>;
   log(events: EventRow[]): Promise<void>;
+  logFiltered(rows: FilteredSignalInput[]): Promise<void>;
 }
 
-/** PostgREST client for the engine RPCs in supabase/bot.sql. */
-export function restDb(url: string, serviceKey: string): Db {
+// ───────────────────────── Analysis (bot-analyze) ─────────────────────────
+
+export interface LessonRecord extends LessonRow {
+  status: "proposed" | "active" | "retired" | "rejected";
+  source: "mined" | "ai";
+  explanation: string;
+  blocked: number;
+  blocked_r: number;
+  created_at: string;
+}
+
+export interface FilteredSignalRow {
+  id: string;
+  user_id: string;
+  account_id: string;
+  lesson_ids: string[];
+  strategy: string;
+  timeframe: string;
+  symbol: string;
+  side: "long" | "short";
+  entry_price: number;
+  stop_price: number;
+  take_profit: number | null;
+  signal_bar_time: string;
+  created_at: string;
+}
+
+export interface AnalysisState {
+  settings: { user_id: string; auto_learn: boolean }[];
+  accounts: { id: string; user_id: string; strategy: string; timeframe: string; start_balance: number; status: "active" | "busted" }[];
+  /** Closed trades, oldest first, with numbers possibly as strings (Postgres numerics). */
+  trades: (Record<string, unknown> & { id: string; reviewed: boolean; review_category: string | null; review: unknown })[];
+  lessons: LessonRecord[];
+  pending_signals: FilteredSignalRow[];
+  last_reports: { user_id: string; kind: string; period_start: string }[];
+}
+
+export interface NewLesson {
+  user_id: string;
+  strategy: string;
+  timeframe: string | null;
+  feature: string;
+  op: "lt" | "gte" | "eq";
+  value: number | string;
+  status: "proposed" | "active";
+  source: "mined" | "ai";
+  title: string;
+  explanation: string;
+  evidence: unknown;
+}
+
+export interface LessonChange {
+  id: string;
+  status?: "proposed" | "active" | "retired";
+  blocked?: number;
+  blocked_r?: number;
+  retired_reason?: string;
+}
+
+export interface ReportInput {
+  user_id: string;
+  kind: string;
+  period_start: string;
+  period_end: string;
+  data: unknown;
+  narrative: unknown;
+  ai_model: string | null;
+  ai_error: string | null;
+}
+
+export interface AnalysisDb {
+  state(): Promise<AnalysisState>;
+  saveReviews(rows: { id: string; review: unknown }[]): Promise<void>;
+  resolveSignals(rows: { id: string; outcome_r: number; outcome_note: string }[]): Promise<void>;
+  saveLessons(rows: (NewLesson | LessonChange)[]): Promise<void>;
+  saveReport(r: ReportInput): Promise<void>;
+}
+
+/** Calls a PostgREST RPC with the service-role key. */
+function rpcClient(url: string, serviceKey: string) {
   const headers: Record<string, string> = { apikey: serviceKey, "Content-Type": "application/json" };
   // Legacy service_role keys are JWTs and also go in Authorization; new sb_secret_ keys go only in apikey.
   if (serviceKey.startsWith("eyJ")) headers.Authorization = `Bearer ${serviceKey}`;
@@ -187,7 +291,12 @@ export function restDb(url: string, serviceKey: string): Db {
     }
     return (text ? JSON.parse(text) : null) as T;
   }
+  return rpc;
+}
 
+/** PostgREST client for the engine RPCs in supabase/bot.sql. */
+export function restDb(url: string, serviceKey: string): Db {
+  const rpc = rpcClient(url, serviceKey);
   return {
     lock: (ttl) => rpc<boolean>("bot_lock", { p_ttl: ttl }),
     unlock: async (error, summary) => void (await rpc("bot_unlock", { p_error: error, p_summary: summary })),
@@ -199,5 +308,18 @@ export function restDb(url: string, serviceKey: string): Db {
       rpc("bot_close_trade", { p_trade_id: a.id, p_price: a.price, p_reason: a.reason, p_fee_rate: a.feeRate, p_at: a.at, p_note: a.note }),
     updateTrades: async (u) => void (u.length && (await rpc("bot_update_trades", { p: u }))),
     log: async (e) => void (e.length && (await rpc("bot_log", { p: e }))),
+    logFiltered: async (f) => void (f.length && (await rpc("bot_log_filtered", { p: f }))),
+  };
+}
+
+/** PostgREST client for the analysis RPCs in supabase/bot.sql. */
+export function restAnalysisDb(url: string, serviceKey: string): AnalysisDb {
+  const rpc = rpcClient(url, serviceKey);
+  return {
+    state: () => rpc<AnalysisState>("bot_analysis_state", {}),
+    saveReviews: async (r) => void (r.length && (await rpc("bot_save_reviews", { p: r }))),
+    resolveSignals: async (r) => void (r.length && (await rpc("bot_resolve_signals", { p: r }))),
+    saveLessons: async (r) => void (r.length && (await rpc("bot_save_lessons", { p: r }))),
+    saveReport: async (r) => void (await rpc("bot_save_report", { p: r })),
   };
 }

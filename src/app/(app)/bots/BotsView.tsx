@@ -92,6 +92,9 @@ export function BotsView() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Link href="/bots/insights" className="inline-flex h-9 items-center rounded-lg border border-line px-3 text-sm font-semibold hover:bg-panel-2">
+            AI analysis
+          </Link>
           <HealthPill rt={d.runtime} />
           {d.settings && (
             <Button size="sm" variant={d.settings.enabled ? "outline" : "primary"} loading={busy} onClick={() => setEnabled(!d.settings!.enabled)}>

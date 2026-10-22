@@ -1,6 +1,6 @@
 "use client";
 
-import type { BotAccount, BotEvent, BotRuntime, BotSettings, BotStrategy, BotTrade } from "@/lib/types";
+import type { BotAccount, BotEvent, BotLesson, BotReport, BotReportKind, BotRuntime, BotSettings, BotStrategy, BotTrade } from "@/lib/types";
 import { unwrap, useQuery } from "./useQuery";
 
 export interface BotsOverview {
@@ -65,5 +65,36 @@ export function useBotTrade(tradeId: string) {
     if (!trade) return { trade: null, strategy: null };
     const strategy = (await sb.from("bot_strategies").select("*").eq("key", trade.strategy).maybeSingle().then(unwrap)) as BotStrategy | null;
     return { trade, strategy };
+  });
+}
+
+export interface BotInsights {
+  settings: BotSettings | null;
+  strategies: BotStrategy[];
+  /** The latest report of each kind. */
+  reports: Partial<Record<BotReportKind, BotReport>>;
+  lessons: BotLesson[];
+}
+
+const REPORT_KINDS: BotReportKind[] = ["hourly", "daily", "weekly", "monthly"];
+
+export function useBotInsights() {
+  return useQuery<BotInsights>("bots:insights", async (sb) => {
+    const [settings, strategies, lessons, ...latest] = await Promise.all([
+      sb.from("bot_settings").select("*").maybeSingle().then(unwrap),
+      sb.from("bot_strategies").select("key, name, version, summary").then(unwrap),
+      sb.from("bot_lessons").select("*").order("created_at", { ascending: false }).then(unwrap),
+      ...REPORT_KINDS.map((k) => sb.from("bot_reports").select("*").eq("kind", k).order("period_start", { ascending: false }).limit(1).maybeSingle().then(unwrap)),
+    ]);
+    const reports: BotInsights["reports"] = {};
+    REPORT_KINDS.forEach((k, i) => {
+      if (latest[i]) reports[k] = latest[i] as BotReport;
+    });
+    return {
+      settings: settings as BotSettings | null,
+      strategies: (strategies ?? []) as BotStrategy[],
+      reports,
+      lessons: (lessons ?? []) as BotLesson[],
+    };
   });
 }

@@ -124,6 +124,78 @@ create table if not exists public.bot_runtime (
 );
 insert into public.bot_runtime (id) values (1) on conflict (id) do nothing;
 
+-- ───────────────────────────── Analysis & learning ─────────────────────────────
+-- Written by the bot-analyze edge function (hourly). See docs/strategies/ANALYSIS.md.
+
+-- When true, lessons confirmed on newer trades are switched on automatically.
+alter table public.bot_settings add column if not exists auto_learn boolean not null default true;
+-- Post-mortem of a closed trade: what went wrong, why, and the fix (analysis.ts → TradeReview).
+alter table public.bot_trades add column if not exists review jsonb;
+create index if not exists bot_trades_unreviewed_idx on public.bot_trades (closed_at) where status = 'closed' and review is null;
+
+-- Entry filters learned from losing trades: "skip <strategy> [<timeframe>] entries when <feature> <op> <value>".
+create table if not exists public.bot_lessons (
+  id              uuid primary key default gen_random_uuid(),
+  user_id         uuid not null references auth.users on delete cascade,
+  strategy        text not null references public.bot_strategies on delete cascade,
+  timeframe       text,                                  -- null: every timeframe of the strategy
+  feature         text not null,
+  op              text not null check (op in ('lt', 'gte', 'eq')),
+  value           jsonb not null,                        -- number or string
+  status          text not null default 'proposed' check (status in ('proposed', 'active', 'retired', 'rejected')),
+  source          text not null default 'mined' check (source in ('mined', 'ai')),
+  title           text not null,
+  explanation     text not null,
+  evidence        jsonb not null default '{}',           -- train/test stats it was confirmed with
+  blocked         int not null default 0,                -- blocked signals whose outcome is known
+  blocked_r       numeric(14,4) not null default 0,      -- what they would have made, in R
+  retired_reason  text,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),
+  activated_at    timestamptz
+);
+create unique index if not exists bot_lessons_rule_uq
+  on public.bot_lessons (user_id, strategy, coalesce(timeframe, '*'), feature, op);
+
+-- Signals a lesson blocked, and what they would have done (filled in later by the analyzer).
+create table if not exists public.bot_filtered_signals (
+  id               uuid primary key default gen_random_uuid(),
+  user_id          uuid not null references auth.users on delete cascade,
+  account_id       uuid not null references public.bot_accounts on delete cascade,
+  lesson_ids       uuid[] not null,
+  strategy         text not null,
+  timeframe        text not null,
+  symbol           text not null,
+  side             text not null check (side in ('long', 'short')),
+  entry_price      numeric(28,10) not null,
+  stop_price       numeric(28,10) not null,
+  take_profit      numeric(28,10),
+  signal_bar_time  timestamptz not null,
+  features         jsonb not null default '{}',
+  created_at       timestamptz not null default now(),
+  outcome_r        numeric(12,4),
+  outcome_note     text,
+  resolved_at      timestamptz
+);
+create index if not exists bot_filtered_open_idx on public.bot_filtered_signals (created_at) where resolved_at is null;
+create index if not exists bot_filtered_user_idx on public.bot_filtered_signals (user_id, created_at desc);
+
+-- Hourly / daily / weekly / monthly analysis reports.
+create table if not exists public.bot_reports (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid not null references auth.users on delete cascade,
+  kind          text not null check (kind in ('hourly', 'daily', 'weekly', 'monthly')),
+  period_start  timestamptz not null,
+  period_end    timestamptz not null,
+  data          jsonb not null,           -- stats, rankings, mistakes, timing, lessons
+  narrative     jsonb,                    -- headline, summary, coaching (AI or template)
+  ai_model      text,                     -- null: the narrative is the built-in template
+  ai_error      text,
+  created_at    timestamptz not null default now(),
+  unique (user_id, kind, period_start)
+);
+create index if not exists bot_reports_user_idx on public.bot_reports (user_id, kind, period_start desc);
+
 -- ───────────────────────────── RLS ─────────────────────────────
 -- The app reads its own bot data. Only the service role (the edge function) writes,
 -- except bot_settings, which the owner can create and change.
@@ -155,6 +227,16 @@ create policy "read own events" on public.bot_events for select to authenticated
 
 drop policy if exists "read runtime" on public.bot_runtime;
 create policy "read runtime" on public.bot_runtime for select to authenticated using (true);
+alter table public.bot_lessons          enable row level security;
+alter table public.bot_filtered_signals enable row level security;
+alter table public.bot_reports          enable row level security;
+
+drop policy if exists "read own lessons" on public.bot_lessons;
+create policy "read own lessons" on public.bot_lessons for select to authenticated using (user_id = auth.uid());
+drop policy if exists "read own filtered signals" on public.bot_filtered_signals;
+create policy "read own filtered signals" on public.bot_filtered_signals for select to authenticated using (user_id = auth.uid());
+drop policy if exists "read own reports" on public.bot_reports;
+create policy "read own reports" on public.bot_reports for select to authenticated using (user_id = auth.uid());
 -- bot_cursors: no policy, so the app can't read or write it.
 
 -- ───────────────────────────── Engine (service role only) ─────────────────────────────
@@ -212,7 +294,12 @@ returns jsonb language sql stable set search_path = public as $$
       from public.bot_accounts a left join public.bot_settings s on s.user_id = a.user_id), '[]'),
     'open_trades', coalesce((
       select jsonb_agg(to_jsonb(t)) from public.bot_trades t where t.status = 'open'), '[]'),
-    'cursors', coalesce((select jsonb_object_agg(key, bar_time) from public.bot_cursors), '{}')
+    'cursors', coalesce((select jsonb_object_agg(key, bar_time) from public.bot_cursors), '{}'),
+    'lessons', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id', l.id, 'user_id', l.user_id, 'strategy', l.strategy, 'timeframe', l.timeframe,
+        'feature', l.feature, 'op', l.op, 'value', l.value, 'title', l.title))
+      from public.bot_lessons l where l.status = 'active'), '[]')
   )
 $$;
 
@@ -375,6 +462,117 @@ returns void language sql set search_path = public as $$
     from jsonb_array_elements(p) e;
 $$;
 
+-- Batch insert of signals blocked by lessons: [{account_id, lesson_ids, symbol, side, entry_price, stop_price, take_profit?, signal_bar_time, features}]
+create or replace function public.bot_log_filtered(p jsonb)
+returns void language sql set search_path = public as $$
+  insert into public.bot_filtered_signals (user_id, account_id, lesson_ids, strategy, timeframe, symbol, side,
+    entry_price, stop_price, take_profit, signal_bar_time, features)
+  select a.user_id, a.id, array(select jsonb_array_elements_text(e->'lesson_ids'))::uuid[], a.strategy, a.timeframe,
+         upper(e->>'symbol'), e->>'side', (e->>'entry_price')::numeric, (e->>'stop_price')::numeric,
+         nullif(e->>'take_profit', '')::numeric, (e->>'signal_bar_time')::timestamptz, coalesce(e->'features', '{}')
+    from jsonb_array_elements(p) e
+    join public.bot_accounts a on a.id = (e->>'account_id')::uuid;
+$$;
+
+-- Everything the analyzer needs in one round trip.
+create or replace function public.bot_analysis_state()
+returns jsonb language sql stable set search_path = public as $$
+  select jsonb_build_object(
+    'settings', coalesce((select jsonb_agg(jsonb_build_object('user_id', user_id, 'auto_learn', auto_learn)) from public.bot_settings), '[]'),
+    'accounts', coalesce((
+      select jsonb_agg(jsonb_build_object('id', id, 'user_id', user_id, 'strategy', strategy, 'timeframe', timeframe,
+                                          'start_balance', start_balance, 'status', status))
+        from public.bot_accounts), '[]'),
+    'trades', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id', t.id, 'user_id', t.user_id, 'account_id', t.account_id, 'strategy', t.strategy, 'timeframe', t.timeframe,
+        'symbol', t.symbol, 'side', t.side, 'qty', t.qty, 'entry_price', t.entry_price, 'initial_stop', t.initial_stop,
+        'take_profit', t.take_profit, 'risk_usd', t.risk_usd, 'opened_at', t.opened_at, 'closed_at', t.closed_at,
+        'exit_reason', t.exit_reason, 'exit_price', t.exit_price, 'exit_note', t.exit_note, 'net_pnl', t.net_pnl,
+        'r_multiple', t.r_multiple, 'mfe_price', t.mfe_price, 'mae_price', t.mae_price,
+        'entry_indicators', t.entry_indicators, 'reviewed', t.review is not null,
+        'review_category', t.review->>'category',
+        'review', case when t.closed_at > now() - interval '35 days' then t.review end) order by t.closed_at)
+        from public.bot_trades t where t.status = 'closed'), '[]'),
+    'lessons', coalesce((select jsonb_agg(to_jsonb(l)) from public.bot_lessons l), '[]'),
+    'pending_signals', coalesce((
+      select jsonb_agg(to_jsonb(f) order by f.created_at)
+        from (select * from public.bot_filtered_signals where resolved_at is null order by created_at limit 200) f), '[]'),
+    'last_reports', coalesce((
+      select jsonb_agg(jsonb_build_object('user_id', user_id, 'kind', kind, 'period_start', period_start))
+        from (select distinct on (user_id, kind) user_id, kind, period_start
+                from public.bot_reports order by user_id, kind, period_start desc) r), '[]')
+  )
+$$;
+
+-- [{id, review}]
+create or replace function public.bot_save_reviews(p jsonb)
+returns void language sql set search_path = public as $$
+  update public.bot_trades t set review = e->'review'
+    from jsonb_array_elements(p) e
+   where t.id = (e->>'id')::uuid and t.status = 'closed';
+$$;
+
+-- [{id, outcome_r, outcome_note}]
+create or replace function public.bot_resolve_signals(p jsonb)
+returns void language sql set search_path = public as $$
+  update public.bot_filtered_signals f
+     set outcome_r = (e->>'outcome_r')::numeric, outcome_note = e->>'outcome_note', resolved_at = now()
+    from jsonb_array_elements(p) e
+   where f.id = (e->>'id')::uuid;
+$$;
+
+-- New lessons ({user_id, strategy, timeframe, feature, op, value, status, source, title, explanation, evidence})
+-- and changes to existing ones ({id, status?, blocked?, blocked_r?, retired_reason?}).
+create or replace function public.bot_save_lessons(p jsonb)
+returns void language plpgsql set search_path = public as $$
+declare e jsonb;
+begin
+  for e in select * from jsonb_array_elements(p) loop
+    if e ? 'id' then
+      update public.bot_lessons set
+        status         = coalesce(e->>'status', status),
+        blocked        = coalesce((e->>'blocked')::int, blocked),
+        blocked_r      = coalesce((e->>'blocked_r')::numeric, blocked_r),
+        retired_reason = coalesce(e->>'retired_reason', retired_reason),
+        activated_at   = case when e->>'status' = 'active' and activated_at is null then now() else activated_at end,
+        updated_at     = now()
+      where id = (e->>'id')::uuid;
+    else
+      insert into public.bot_lessons (user_id, strategy, timeframe, feature, op, value, status, source, title, explanation, evidence, activated_at)
+      values ((e->>'user_id')::uuid, e->>'strategy', nullif(e->>'timeframe', ''), e->>'feature', e->>'op', e->'value',
+              e->>'status', coalesce(e->>'source', 'mined'), e->>'title', e->>'explanation', coalesce(e->'evidence', '{}'),
+              case when e->>'status' = 'active' then now() end)
+      on conflict (user_id, strategy, coalesce(timeframe, '*'), feature, op) do nothing;
+    end if;
+  end loop;
+end $$;
+
+-- {user_id, kind, period_start, period_end, data, narrative, ai_model, ai_error}
+create or replace function public.bot_save_report(p jsonb)
+returns void language sql set search_path = public as $$
+  insert into public.bot_reports (user_id, kind, period_start, period_end, data, narrative, ai_model, ai_error)
+  values ((p->>'user_id')::uuid, p->>'kind', (p->>'period_start')::timestamptz, (p->>'period_end')::timestamptz,
+          p->'data', p->'narrative', p->>'ai_model', p->>'ai_error')
+  on conflict (user_id, kind, period_start) do update set
+    period_end = excluded.period_end, data = excluded.data, narrative = excluded.narrative,
+    ai_model = excluded.ai_model, ai_error = excluded.ai_error, created_at = now();
+$$;
+
+-- The owner switches a lesson on, back to proposed, or rejects it for good.
+create or replace function public.bot_set_lesson_status(p_id uuid, p_status text)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if p_status not in ('active', 'proposed', 'rejected') then raise exception 'invalid status'; end if;
+  update public.bot_lessons
+     set status = p_status, updated_at = now(),
+         activated_at = case when p_status = 'active' then coalesce(activated_at, now()) else activated_at end
+   where id = p_id and user_id = auth.uid();
+  if not found then raise exception 'lesson not found'; end if;
+end $$;
+revoke all on function public.bot_set_lesson_status(uuid, text) from public, anon;
+grant execute on function public.bot_set_lesson_status(uuid, text) to authenticated;
+
 -- Supabase grants EXECUTE on new functions to anon and authenticated by default.
 -- These must only be callable by the edge function (service role).
 do $$
@@ -383,7 +581,9 @@ begin
   foreach f in array array[
     'bot_lock(int)', 'bot_unlock(text, jsonb)', 'bot_sync(jsonb, text[])', 'bot_get_state()',
     'bot_set_cursor(text, timestamptz)', 'bot_open_trade(jsonb)',
-    'bot_close_trade(uuid, numeric, text, numeric, timestamptz, text)', 'bot_update_trades(jsonb)', 'bot_log(jsonb)'
+    'bot_close_trade(uuid, numeric, text, numeric, timestamptz, text)', 'bot_update_trades(jsonb)', 'bot_log(jsonb)',
+    'bot_log_filtered(jsonb)', 'bot_analysis_state()', 'bot_save_reviews(jsonb)', 'bot_resolve_signals(jsonb)',
+    'bot_save_lessons(jsonb)', 'bot_save_report(jsonb)'
   ] loop
     execute format('revoke all on function public.%s from public, anon, authenticated', f);
     execute format('grant execute on function public.%s to service_role', f);
@@ -394,6 +594,7 @@ end $$;
 create or replace function public.bot_prune_events()
 returns void language sql set search_path = public as $$
   delete from public.bot_events where kind in ('skipped', 'missed_bar') and created_at < now() - interval '45 days';
+  delete from public.bot_reports where kind = 'hourly' and period_start < now() - interval '30 days';
 $$;
 revoke all on function public.bot_prune_events() from public, anon, authenticated;
 grant execute on function public.bot_prune_events() to service_role;
