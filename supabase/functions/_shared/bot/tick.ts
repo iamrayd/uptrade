@@ -2,7 +2,8 @@ import type { Candle, Timeframe } from "./types.ts";
 import { SYMBOLS, TF_SECONDS, TIMEFRAMES } from "./types.ts";
 import { STRATEGIES, STRATEGY_BY_KEY } from "./strategies.ts";
 import { checkExit, roundStop, sizePosition, TAKER_FEE, tighterStop, toTick } from "./risk.ts";
-import type { AccountRow, Db, EventRow, Market, SymbolFilters, TradeRow, TradeUpdate } from "./io.ts";
+import { entryFeatures, ruleBlocks } from "./analysis.ts";
+import type { AccountRow, Db, EventRow, FilteredSignalInput, LessonRow, Market, SymbolFilters, TradeRow, TradeUpdate } from "./io.ts";
 
 // One bot run. Called every minute by pg_cron → bot-tick edge function.
 //
@@ -10,7 +11,8 @@ import type { AccountRow, Db, EventRow, Market, SymbolFilters, TradeRow, TradeUp
 //     trade was last checked, and fill stops, targets and liquidations in time order.
 //  2. Bar closes: for every timeframe whose bar just closed, each strategy
 //     account manages its open trade (signal exits, trailing stops) and then
-//     looks for a new entry, which fills at the current price.
+//     looks for a new entry, which fills at the current price unless an active
+//     lesson (learned by bot-analyze from past losers) says to skip it.
 //
 // Signals use closed bars only. A bar is acted on only if the run sees it soon
 // after it closed. A signal seen late (after downtime) is logged as missed rather
@@ -26,6 +28,8 @@ export interface TickSummary {
   closed: number;
   stopMoves: number;
   signalsSkipped: number;
+  /** Signals skipped because an active lesson matched them. */
+  signalsFiltered: number;
   barsEvaluated: number;
   errors: string[];
 }
@@ -40,10 +44,11 @@ export function freshnessMs(tf: Timeframe) {
 }
 
 export async function runTick({ market, db, now = Date.now }: { market: Market; db: Db; now?: () => number }): Promise<TickSummary> {
-  const summary: TickSummary = { opened: 0, closed: 0, stopMoves: 0, signalsSkipped: 0, barsEvaluated: 0, errors: [] };
+  const summary: TickSummary = { opened: 0, closed: 0, stopMoves: 0, signalsSkipped: 0, signalsFiltered: 0, barsEvaluated: 0, errors: [] };
   if (!(await db.lock(LOCK_TTL_SECONDS))) return { ...summary, skipped: "another run holds the lock" };
 
   const events: EventRow[] = [];
+  const filtered: FilteredSignalInput[] = [];
   const updates = new Map<string, TradeUpdate>();
   const pend = (id: string, u: Omit<TradeUpdate, "id">) => updates.set(id, { ...(updates.get(id) ?? { id }), ...u });
   let fatal: string | null = null;
@@ -54,6 +59,8 @@ export async function runTick({ market, db, now = Date.now }: { market: Market; 
     if (u.length) await db.updateTrades(u);
     const e = events.splice(0);
     if (e.length) await db.log(e);
+    const f = filtered.splice(0);
+    if (f.length) await db.logFiltered(f);
   };
 
   try {
@@ -66,6 +73,7 @@ export async function runTick({ market, db, now = Date.now }: { market: Market; 
     const accById = new Map(accounts.map((a) => [a.id, a]));
     const open: TradeRow[] = state.open_trades.map(numTrade);
     const cursors = state.cursors;
+    const lessons: LessonRow[] = state.lessons ?? [];
     let filters: Record<string, SymbolFilters> | null = null; // qty step / price tick, fetched when first needed
     const getFilters = async (symbol: string) => (filters ??= await market.symbolFilters(SYMBOLS))[symbol] ?? { step: 0.00001, tick: 0.01 };
     if (!accounts.length) return { ...summary, skipped: "no bot accounts (enable bots in the app)" };
@@ -226,6 +234,34 @@ export async function runTick({ market, db, now = Date.now }: { market: Market; 
       if (sig.side === "long" ? sig.stop >= price : sig.stop <= price) return skip(`price ${fmt(price)} already moved through the stop ${fmt(sig.stop)}.`);
       if (sig.takeProfit != null && (sig.side === "long" ? price >= sig.takeProfit : price <= sig.takeProfit))
         return skip(`price ${fmt(price)} already reached the target ${fmt(sig.takeProfit)}.`);
+
+      // Lessons learned from past losers (see analysis.ts). The blocked signal is kept so
+      // bot-analyze can check what it would have done and retire lessons that cost money.
+      const features = entryFeatures({ side: sig.side, entry: price, stop: sig.stop, symbol, at, indicators: sig.indicators });
+      const blockers = lessons.filter(
+        (l) => l.user_id === acc.user_id && l.strategy === acc.strategy && (l.timeframe == null || l.timeframe === tf) && ruleBlocks(l, features),
+      );
+      if (blockers.length) {
+        summary.signalsFiltered++;
+        filtered.push({
+          account_id: acc.id,
+          lesson_ids: blockers.map((l) => l.id),
+          symbol,
+          side: sig.side,
+          entry_price: price,
+          stop_price: sig.stop,
+          take_profit: sig.takeProfit,
+          signal_bar_time: iso(signalBar.time * 1000),
+          features,
+        });
+        events.push({
+          ...base,
+          kind: "skipped",
+          message: `${sig.side === "long" ? "Long" : "Short"} signal not taken: lesson "${blockers[0].title}"${blockers.length > 1 ? ` (+${blockers.length - 1} more)` : ""}.`,
+          data: { lesson_ids: blockers.map((l) => l.id), indicators: sig.indicators },
+        });
+        return;
+      }
 
       const margins = open.filter((x) => x.account_id === acc.id).reduce((s, x) => s + x.margin, 0);
       const equity = acc.balance + margins;

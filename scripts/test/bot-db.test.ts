@@ -24,6 +24,14 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
   const market = fakeMarket(minutes, () => nowMs, { BTCUSDT: 0.00001, ETHUSDT: 0.0001, SOLUSDT: 0.001 });
   const db = pgDb(pg);
 
+  // An active lesson that blocks every Supertrend 15m entry (any stop distance ≥ 0).
+  await db.sync(STRATEGIES.map(({ key, name, version, summary, rules, params }) => ({ key, name, version, summary, rules, params })), TIMEFRAMES);
+  await pg.query(
+    `insert into public.bot_lessons (user_id, strategy, timeframe, feature, op, value, status, title, explanation)
+     values ($1, 'supertrend', '15m', 'stopPct', 'gte', '0', 'active', 'block all', 'test')`,
+    [USER],
+  );
+
   // Run every 5 minutes (+60s) for days 18–22, with one 20-hour outage on day 19.
   const simStart = START + 18 * DAY;
   const outage = [simStart + DAY + 3600, simStart + DAY + 21 * 3600];
@@ -103,6 +111,13 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
     }
     assert.ok(new Date(t.closed_at as string) >= new Date(t.opened_at as string));
   }
+
+  // The lesson kept Supertrend 15m out of every trade, and each blocked signal was kept for review.
+  assert.equal(trades.filter((t) => t.strategy === "supertrend" && t.timeframe === "15m").length, 0);
+  const blocked = (await pg.query<{ strategy: string; timeframe: string; features: Record<string, unknown>; lesson_ids: string[] }>(`select * from public.bot_filtered_signals`)).rows;
+  assert.ok(blocked.length > 0, "the lesson should have blocked some signals");
+  assert.ok(blocked.every((b) => b.strategy === "supertrend" && b.timeframe === "15m" && b.lesson_ids.length === 1 && typeof b.features.stopPct === "number"));
+  assert.ok(trades.some((t) => t.strategy === "supertrend" && t.timeframe !== "15m"), "other timeframes are unaffected");
 
   // The outage was logged as missed bars, not traded late.
   const missed = (await pg.query(`select count(*)::int n from public.bot_events where kind = 'missed_bar'`)).rows[0] as { n: number };

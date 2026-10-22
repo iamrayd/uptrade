@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import type { Candle } from "../../supabase/functions/_shared/bot/types.ts";
-import type { Db, Market } from "../../supabase/functions/_shared/bot/io.ts";
+import type { AnalysisDb, Db, Market } from "../../supabase/functions/_shared/bot/io.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -151,6 +151,24 @@ export function pgDb(pg: PGlite): Db {
       call("select public.bot_close_trade($1::uuid, $2::numeric, $3, $4::numeric, $5::timestamptz, $6) r", [a.id, a.price, a.reason, a.feeRate, a.at, a.note]),
     updateTrades: async (u) => void (u.length && (await call("select public.bot_update_trades($1::jsonb) r", [j(u)]))),
     log: async (e) => void (e.length && (await call("select public.bot_log($1::jsonb) r", [j(e)]))),
+    logFiltered: async (f) => void (f.length && (await call("select public.bot_log_filtered($1::jsonb) r", [j(f)]))),
+  };
+}
+
+/** The analysis RPCs, as service_role. */
+export function pgAnalysisDb(pg: PGlite): AnalysisDb {
+  const call = async <T>(sql: string, params: unknown[]) =>
+    pg.transaction(async (tx) => {
+      await tx.exec("set local role service_role");
+      return (await tx.query<{ r: T }>(sql, params)).rows[0]?.r as T;
+    });
+  const j = (v: unknown) => JSON.stringify(v);
+  return {
+    state: () => call("select public.bot_analysis_state() r", []),
+    saveReviews: async (r) => void (r.length && (await call("select public.bot_save_reviews($1::jsonb) r", [j(r)]))),
+    resolveSignals: async (r) => void (r.length && (await call("select public.bot_resolve_signals($1::jsonb) r", [j(r)]))),
+    saveLessons: async (r) => void (r.length && (await call("select public.bot_save_lessons($1::jsonb) r", [j(r)]))),
+    saveReport: async (r) => void (await call("select public.bot_save_report($1::jsonb) r", [j(r)])),
   };
 }
 

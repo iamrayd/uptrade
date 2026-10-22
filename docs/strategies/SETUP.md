@@ -29,6 +29,10 @@ Open [`supabase/bot_cron.sql`](../../supabase/bot_cron.sql) and replace `<PROJEC
 
 Open UpTrade → **Bots** → **Start bots**. Within a minute the 30 accounts appear, and the status pill turns green (**Running**).
 
+## 5. AI analysis and learning (optional, recommended)
+
+Deploy `bot-analyze` and re-run `bot_cron.sql`. This reviews every trade, ranks the setups, writes hourly to monthly reports and lets the bots learn from their losers. See [ANALYSIS.md](ANALYSIS.md).
+
 ## Checking it's healthy
 
 - The Bots page shows **Running** with a green dot when the last run was under 5 minutes ago. Amber means the last run hit an error, which is shown on the page. Red means it hasn't run.

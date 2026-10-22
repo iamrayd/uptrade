@@ -9,6 +9,7 @@ A personal crypto paper-trading app and trade journal. It uses live Binance pric
 - **Journal:** notes, setup tags, a 1–5 execution rating, and screenshots for each trade, shown next to a chart of the trade.
 - **Balance:** starts at $1,000. You can add or deduct funds at any time, and every change is logged.
 - **Strategy bots:** 5 crypto strategies × 6 timeframes (5m–1d), each in its own $100 paper account, trading BTC/ETH/SOL around the clock from a Supabase cron job. Every trade is journaled: why it entered, the indicator readings, the sizing and risk plan, every stop move, and why it exited. See [docs/strategies](docs/strategies/README.md) and the one-time [setup](docs/strategies/SETUP.md).
+- **AI analysis and learning:** every hour the bots' trades are reviewed: why each losing entry failed and how to fix it. Each strategy × timeframe is ranked by how usable it would be with real money: edge after slippage at 95% confidence, consistency, drawdown. Hourly, daily, weekly and monthly reports are written by Claude (optional) or a built-in template. The bots learn entry filters from their losers, but only filters that also hold on newer trades they weren't learned from. They use those filters on the next trade and retire any that turn out to cost money. See [docs/strategies/ANALYSIS.md](docs/strategies/ANALYSIS.md).
 
 Stack: Next.js 16 (App Router), Tailwind v4, Supabase (Auth, Postgres, Storage), TradingView Lightweight Charts, and Binance public market data (no API key needed).
 
