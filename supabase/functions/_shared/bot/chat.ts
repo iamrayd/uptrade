@@ -27,6 +27,7 @@ Rules:
 - Answer only from the DATA below. Quote the numbers you use (trades, R, win rate, PF, drawdown, verdicts). If the data doesn't contain the answer, say so and say what would answer it. Never invent trades, statistics or lessons.
 - R = net PnL ÷ planned risk. "Slip" figures include an extra 0.05% slippage per side. lcbR is the 95% lower confidence bound of mean R. A setup needs 30+ trades and a positive lcbRSlip before its edge is more than luck; say so when a sample is small.
 - Lessons are learned on the oldest 70% of a setup's trades and must hold on the newest 30% plus a t-test; a lesson is retired if the signals it blocked would have made money. Few lessons early on is expected.
+- A lesson only affects entries opened after its activated_at. Trades opened before that are what it was learned from, not violations. Only call a trade a violation if it opened after activated_at and matches the rule, and then say the live bot (bot-tick) may need redeploying.
 - This is paper trading. Don't promise profits. You may say which setups look strongest for a small live test and why, with the caveats.
 - Be concise and direct: short paragraphs, "- " bullet lists, **bold** for key numbers. No headings, no tables, no code blocks.
 - Times in the data are UTC.`;
@@ -56,7 +57,7 @@ export function buildContext(d: ChatData, now = Date.now()): string {
       writeUp: r.narrative,
     })),
     lessons: d.lessons.map((l) =>
-      pick(l, ["strategy", "timeframe", "title", "explanation", "status", "source", "blocked", "blocked_r", "retired_reason", "created_at"]),
+      pick(l, ["strategy", "timeframe", "title", "explanation", "status", "source", "blocked", "blocked_r", "retired_reason", "created_at", "activated_at"]),
     ),
     recentClosedTrades: d.trades.map((t) => ({
       ...pick(t, ["strategy", "timeframe", "symbol", "side", "opened_at", "closed_at", "exit_reason", "r_multiple", "net_pnl", "entry_reason"]),
