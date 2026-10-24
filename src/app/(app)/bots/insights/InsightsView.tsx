@@ -8,6 +8,7 @@ import { bumpData, toast } from "@/lib/store";
 import { fmtR } from "@/lib/bots";
 import { baseAsset, fmtDateTime, fmtPct, fmtSignedUsd, pnlClass } from "@/lib/format";
 import type { BotLesson, BotLessonStatus, BotReport, BotReportKind, BotSetupStats, BotTimingRow, BotVerdict } from "@/lib/types";
+import { AnalysisChat } from "@/components/AnalysisChat";
 import { TfBadge } from "@/components/BotBits";
 import { Button, Card, EmptyState, Segmented, Skeleton, cx } from "@/components/ui";
 
@@ -64,6 +65,8 @@ export function InsightsView() {
         </div>
         <Segmented size="sm" className="w-full sm:w-80" value={kind} onChange={setKind} options={KINDS} />
       </div>
+
+      <AnalysisChat />
 
       <Learning lessons={d.lessons} autoLearn={d.settings?.auto_learn ?? true} hasSettings={!!d.settings} name={name} />
 
