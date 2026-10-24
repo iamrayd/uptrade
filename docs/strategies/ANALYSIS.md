@@ -120,6 +120,24 @@ Each report contains:
 
 Claude (`claude-opus-5-5`) gets only these computed numbers, plus each strategy's summary and parameters. It is told to quote the numbers it relies on and to call small samples unproven.
 
+## 5. Ask about the analysis (chatbot)
+
+The **Ask about the analysis** box at the top of **Bots → AI analysis** answers questions in plain English. For example: *"Which setup is closest to being ready for real money?"*, *"Why does Donchian 5m keep losing?"*, *"Is the ADX lesson helping?"*
+
+- It runs on **Google Gemini's free tier** through the `bot-chat` edge function. The API key stays on the server, and the function only reads the signed-in user's own reports, lessons, recent trades and open trades.
+- It answers from the latest hourly, daily, weekly and monthly reports, all lessons, and the last 40 closed trades with their reviews. It's told to quote the numbers it uses and to say when the data can't answer.
+- The conversation is kept in your browser, and only the last 12 messages are sent with each question.
+- **Free-tier limits:** Google caps free requests per minute and per day, and the caps change over time; see your limits in [AI Studio](https://aistudio.google.com). When they run out, the chat says so; try again a minute later, or the next day. Google may use free-tier prompts, which here are your bots' trade stats, to improve its models.
+
+**Setup:**
+1. Get a free API key at https://aistudio.google.com/apikey.
+2. Run these from the repo folder:
+   ```bash
+   npx supabase secrets set GEMINI_API_KEY=...
+   npx supabase functions deploy bot-chat      # no --no-verify-jwt: only signed-in users may call it
+   ```
+3. Optional: the model defaults to `gemini-flash-latest`, Google's alias for its current Flash model. To pin a specific one: `npx supabase secrets set GEMINI_MODEL=<model id>`.
+
 ## Setup
 
 Do this after the bots are running (see [SETUP.md](SETUP.md)).
