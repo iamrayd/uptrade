@@ -114,10 +114,35 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
 
   // The lesson kept Supertrend 15m out of every trade, and each blocked signal was kept for review.
   assert.equal(trades.filter((t) => t.strategy === "supertrend" && t.timeframe === "15m").length, 0);
-  const blocked = (await pg.query<{ strategy: string; timeframe: string; features: Record<string, unknown>; lesson_ids: string[] }>(`select * from public.bot_filtered_signals`)).rows;
+  const skipped = (await pg.query<{ strategy: string; timeframe: string; features: Record<string, unknown>; lesson_ids: string[]; reason: string }>(`select * from public.bot_filtered_signals`)).rows;
+  const blocked = skipped.filter((b) => b.reason === "lesson");
   assert.ok(blocked.length > 0, "the lesson should have blocked some signals");
   assert.ok(blocked.every((b) => b.strategy === "supertrend" && b.timeframe === "15m" && b.lesson_ids.length === 1 && typeof b.features.stopPct === "number"));
+  // Signals the confluence gate skipped are kept too, with the score they were skipped at, for the learner to replay.
+  const gated = skipped.filter((b) => b.reason === "confluence");
+  assert.ok(gated.length > 0, "the confluence gate should have skipped some signals");
+  assert.ok(gated.every((b) => b.lesson_ids.length === 0 && typeof b.features.confluence === "number"));
+  // Most were skipped for scoring under 65; the rest scored higher but were refused outright (price against both EMA 200 and Supertrend).
+  assert.ok(gated.some((b) => (b.features.confluence as number) < 65));
+  // Gates run before lessons, so a lesson is never credited with a signal the gate had already skipped.
+  assert.ok(blocked.every((b) => typeof b.features.confluence === "number" && (b.features.confluence as number) >= 65));
+  // Every trade that was taken passed the gate and carries its confluence reading.
+  assert.ok(trades.every((t) => typeof (t.entry_indicators as Record<string, number>).cfScore === "number" && (t.entry_indicators as Record<string, number>).cfScore >= 65));
   assert.ok(trades.some((t) => t.strategy === "supertrend" && t.timeframe !== "15m"), "other timeframes are unaffected");
+  // Each check's own result and the threshold used are stored with the trade (weight-0 checks become learnable).
+  assert.ok(trades.every((t) => {
+    const ind = t.entry_indicators as Record<string, number>;
+    return ind.cfMin === 65 && Object.keys(ind).some((k) => k.startsWith("cf_")) && typeof ind.convMult === "number";
+  }));
+
+  // Probation: 5m–30m setups start shadow-only — zero trades, but their signals are kept with reason 'probation'.
+  const shortTf = (tf: unknown) => ["5m", "15m", "30m"].includes(tf as string);
+  assert.equal(trades.filter((t) => shortTf(t.timeframe)).length, 0, "a probation setup must not trade");
+  const probation = skipped.filter((b) => b.reason === "probation");
+  assert.ok(probation.length > 0, "probation setups should have logged shadow signals");
+  assert.ok(probation.every((b) => shortTf(b.timeframe) && b.lesson_ids.length === 0 && typeof b.features.confluence === "number"));
+  // Probation runs after the gates, so its shadows measure entries that would really have been traded.
+  assert.ok(probation.every((b) => (b.features.confluence as number) >= 65));
 
   // The outage was logged as missed bars, not traded late.
   const missed = (await pg.query(`select count(*)::int n from public.bot_events where kind = 'missed_bar'`)).rows[0] as { n: number };

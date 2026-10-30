@@ -43,7 +43,7 @@ export function BotsView() {
       if (!u.user) throw new Error("Not signed in");
       const { error: e } = await sb.from("bot_settings").upsert({ user_id: u.user.id, enabled, updated_at: new Date().toISOString() });
       if (e) throw new Error(e.message);
-      toast("success", enabled ? "Bots enabled" : "Bots paused", enabled ? "30 accounts are created within a minute of the next run." : "Open trades are still managed until they exit.");
+      toast("success", enabled ? "Bots enabled" : "Bots paused", enabled ? "The accounts are created within a minute of the next run." : "Open trades are still managed until they exit.");
       bumpData();
     } catch (e) {
       toast("error", "Couldn't update bots", (e as Error).message);
@@ -88,7 +88,7 @@ export function BotsView() {
         <div>
           <h1 className="text-xl font-bold tracking-tight">Strategy bots</h1>
           <p className="text-sm text-muted">
-            5 strategies × 6 timeframes, each a separate ${d.settings?.start_balance ?? 100} paper account trading {BOT_SYMBOLS.map(baseAsset).join(" / ")}.
+            Every strategy × 6 timeframes (the news-aware ones next to their plain twins), each a separate ${d.settings?.start_balance ?? 100} paper account trading {BOT_SYMBOLS.map(baseAsset).join(" / ")}.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -108,7 +108,7 @@ export function BotsView() {
         <Card className="p-5">
           <h2 className="font-semibold">Start the strategy test</h2>
           <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-muted">
-            <li>Creates 30 isolated accounts, one per strategy and timeframe, with $100 each.</li>
+            <li>Creates isolated accounts, one per strategy and timeframe, with $100 each.</li>
             <li>Each trade risks 2% of that account&apos;s equity with leverage of at most 20x, and its liquidation price always sits beyond the stop.</li>
             <li>Every entry, stop move and exit is written up with the reason and the indicator readings.</li>
           </ul>
@@ -134,7 +134,7 @@ export function BotsView() {
       {rows.length > 0 && (
         <>
           <Card className="num grid grid-cols-2 gap-4 p-4 sm:grid-cols-3 lg:grid-cols-6">
-            <Kpi label="All 30 accounts" value={fmtUsd(totalEq)} sub={`from ${fmtUsd(totalStart)}`} />
+            <Kpi label={`All ${rows.length} accounts`} value={fmtUsd(totalEq)} sub={`from ${fmtUsd(totalStart)}`} />
             <Kpi label="Net" value={fmtSignedUsd(totalEq - totalStart)} cls={pnlClass(totalEq - totalStart)} sub={fmtPct(totalStart ? ((totalEq - totalStart) / totalStart) * 100 : null)} />
             <Kpi label="Closed trades" value={String(closedAll.length)} sub={closedAll.length ? `${((winsAll / closedAll.length) * 100).toFixed(0)}% winners` : undefined} />
             <Kpi label="Open trades" value={String(d.openTrades.length)} />

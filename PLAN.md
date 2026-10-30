@@ -1,6 +1,6 @@
 # Strategy improvement plan — bot trading patterns
 
-Date: 2026-10-29. Status: final design, awaiting approval to implement.
+Date: 2026-10-29. Status: implemented 2026-10-30 (changes 1–5; see tuning.ts, bot.sql per-setup tuning columns, scripts/test/bot-tuning.test.ts). One deviation: a breakeven stop-out reports exit reason `trailing_stop` with a "breakeven stop" note, instead of a new `breakeven_stop` reason, to avoid widening the `bot_trades.exit_reason` check constraint.
 Evidence base: `docs/strategies/EVIDENCE.md` (1-year replay, ~20k trades), `docs/backtests/after-upgrade.md`, full code exploration of `supabase/functions/_shared/bot/` (3 subagent reports, file:line cites below).
 
 ## Measured problems

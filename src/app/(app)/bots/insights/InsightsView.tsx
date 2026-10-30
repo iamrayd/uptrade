@@ -70,6 +70,8 @@ export function InsightsView() {
 
       <Learning lessons={d.lessons} autoLearn={d.settings?.auto_learn ?? true} hasSettings={!!d.settings} name={name} />
 
+      {report?.data.learning && <LearningEffect l={report.data.learning} name={name} />}
+
       {!report ? (
         <Card>
           <EmptyState
@@ -149,8 +151,9 @@ function Learning({ lessons, autoLearn, hasSettings, name }: { lessons: BotLesso
         <div>
           <h2 className="font-semibold">What the bots learned</h2>
           <p className="mt-0.5 max-w-2xl text-sm text-muted">
-            Each run studies the losing trades, looks for entry conditions they share, and keeps a filter only if it&apos;s statistically clear on older trades{" "}
-            <em>and</em> still holds on the newer trades it wasn&apos;t learned from. Signals a lesson blocks are replayed later; a lesson that would have cost money is retired.
+            Each run studies the losing trades <em>and</em> the signals the bots skipped (replayed afterwards), looks for entry conditions they share, and keeps a filter only if it&apos;s
+            statistically clear on older entries <em>and</em> still holds on the newer ones it wasn&apos;t learned from. Named mistakes (a stop inside the noise, a weak trend, trading against the
+            news …) need less evidence than a blind search. Signals a lesson blocks are replayed later; a lesson that would have cost money, now or lately, is retired.
           </p>
         </div>
         {hasSettings && (
@@ -159,14 +162,15 @@ function Learning({ lessons, autoLearn, hasSettings, name }: { lessons: BotLesso
           </Button>
         )}
       </div>
-      <div className="num mt-3 grid grid-cols-3 gap-3 text-sm">
+      <div className="num mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
         <Stat label="Active lessons" value={String(active.length)} />
+        <Stat label="Waiting for room" value={String(lessons.filter((l) => l.status === "proposed" && !l.paused).length)} />
         <Stat label="Blocked signals checked" value={String(checked)} />
         <Stat label="R saved by active lessons" value={checked ? fmtR(savedR) : "—"} cls={pnlClass(savedR)} />
       </div>
       {!live.length ? (
         <p className="mt-4 rounded-lg bg-panel-2 px-3 py-2 text-sm text-muted">
-          No lessons yet. A setup needs 30+ closed trades before anything is learned from it, and a lesson needs a clear pattern, so expect the first ones after a few weeks of trading.
+          No lessons yet. A setup needs 30+ entries (its trades plus the signals it skipped) before a filter is learned from it (20+ for the named mistakes), and a lesson needs a clear pattern, so expect the first ones after a few weeks.
         </p>
       ) : (
         <ul className="mt-4 space-y-2">
@@ -193,8 +197,95 @@ function Learning({ lessons, autoLearn, hasSettings, name }: { lessons: BotLesso
   );
 }
 
+const REASON: Record<string, string> = {
+  confluence: "Too few indicators agreed",
+  news: "News gate",
+  cooldown: "Cooling down after a loss",
+  lesson: "Blocked by a lesson",
+  busted: "Account busted",
+  probation: "Setup on probation (shadow-only)",
+  min_stop: "Stop too tight / size too small",
+};
+
+function LearningEffect({ l, name }: { l: NonNullable<BotReport["data"]["learning"]>; name: (k: string) => string }) {
+  const label = (s: { strategy: string; timeframe: string | null }) => `${name(s.strategy)} ${s.timeframe ?? ""}`.trim();
+  const gate = l.gate;
+  return (
+    <Card className="p-4">
+      <h2 className="font-semibold">Are the bots getting better?</h2>
+      <p className="mt-0.5 max-w-2xl text-sm text-muted">
+        Average R per trade (after slippage) before the first lesson switched on vs since, the mistakes that cost the most, and what the entry gate and the other filters skipped. Small samples are noise: wait for 30+
+        trades since.
+      </p>
+      <div className="mt-3 grid gap-4 lg:grid-cols-2">
+        <div>
+          <div className="text-xs font-semibold text-muted">Entries before vs after lessons</div>
+          {!l.impact.length ? (
+            <p className="mt-1 text-xs text-faint">No setup has an active lesson yet.</p>
+          ) : (
+            <ul className="num mt-1 divide-y divide-line text-xs">
+              {[...l.impact]
+                .sort((a, b) => b.after.n - a.after.n)
+                .map((r) => {
+                  const better = r.before.avgR != null && r.after.avgR != null && r.after.avgR > r.before.avgR;
+                  return (
+                    <li key={`${r.strategy}${r.timeframe}`} className="flex items-center justify-between gap-2 py-1.5">
+                      <span className="truncate">{label(r)}</span>
+                      <span className="whitespace-nowrap text-muted">
+                        {fmtR(r.before.avgR)} <span className="text-faint">({r.before.n})</span> →{" "}
+                        <span className={cx("font-semibold", r.after.n ? (better ? "text-up" : "text-down") : "text-faint")}>{r.after.n ? fmtR(r.after.avgR) : "—"}</span>{" "}
+                        <span className="text-faint">({r.after.n})</span>
+                      </span>
+                    </li>
+                  );
+                })}
+            </ul>
+          )}
+        </div>
+        <div>
+          <div className="text-xs font-semibold text-muted">Mistakes that cost the most</div>
+          {!l.tags.length ? (
+            <p className="mt-1 text-xs text-faint">No mistake has cost anything measurable yet.</p>
+          ) : (
+            <ul className="num mt-1 divide-y divide-line text-xs">
+              {l.tags.map((t) => (
+                <li key={t.tag} className="py-1.5">
+                  <div className="flex justify-between gap-2">
+                    <span className="font-medium text-fg">{t.label}</span>
+                    <span className="text-down">−{t.costR.toFixed(1)}R</span>
+                  </div>
+                  <div className="text-faint">
+                    {t.withN} entries with it averaged {fmtR(t.withAvgR)}, {t.withoutN} without {fmtR(t.withoutAvgR)}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+      {(l.replayed.length > 0 || gate.skippedN > 0) && (
+        <div className="mt-4">
+          <div className="text-xs font-semibold text-muted">Signals the bots did not trade (replayed afterwards)</div>
+          <ul className="num mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+            {l.replayed.map((r) => (
+              <li key={r.reason}>
+                {REASON[r.reason] ?? r.reason}: {r.n} · would have made {fmtR(r.avgR)} each
+              </li>
+            ))}
+          </ul>
+          {gate.skippedN >= 5 && (
+            <p className="mt-1 text-xs text-muted">
+              The indicator gate skipped {gate.skippedN} signals that would have averaged {fmtR(gate.skippedAvgR)}; the {gate.tradedN} trades it let through averaged {fmtR(gate.tradedAvgR)}.
+            </p>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function LessonItem({ l, name, busy, onStatus }: { l: BotLesson; name: (k: string) => string; busy: boolean; onStatus: (s: BotLessonStatus) => void }) {
-  const st = STATUS[l.status];
+  const st = l.status === "proposed" && l.paused ? { label: "Paused", cls: "bg-panel-2 text-muted" } : STATUS[l.status];
   const avg = l.blocked ? Number(l.blocked_r) / l.blocked : null;
   return (
     <li className="rounded-lg border border-line p-3">

@@ -6,8 +6,13 @@ export const TAKER_FEE = 0.0002;
 export const MAKER_FEE = 0;
 /** Smallest order notional we'll place (Binance's spot minimum is $5). */
 export const MIN_NOTIONAL = 5;
-/** Never take a stop tighter than this, as a fraction of price. Fees and noise eat anything closer. */
-export const MIN_STOP_PCT = 0.0015;
+/**
+ * Never take a stop tighter than this, as a fraction of price. Fees are a fixed share of the price, so
+ * the closer the stop, the bigger the share of the risk they eat. On a year of history (20,000 trades),
+ * stops under 0.2% of price averaged −0.19R, 0.2–0.4% −0.07R, and everything wider about 0R. It was
+ * 0.15%; at 0.4% the same trades average 0.018R better, in both halves of the year.
+ */
+export const MIN_STOP_PCT = 0.004;
 /** The liquidation price must be at least this many stop-distances away from entry. */
 export const LIQ_BUFFER = 1.5;
 
@@ -177,6 +182,23 @@ export function closeMath(a: { side: Side; entry: number; exit: number; qty: num
     fee = a.margin + pnl;
   }
   return { pnl, fee };
+}
+
+/**
+ * Breakeven stop once a trade has reached +1R: entry nudged in the trade's favour by enough to
+ * cover both taker fees, so a stop-out from here is a true scratch. Goes through tighterStop,
+ * so it only ever tightens the stop and a strategy's own trailing stop can still be tighter.
+ */
+export function breakevenStop(side: Side, entry: number) {
+  return side === "long" ? entry * (1 + 2 * TAKER_FEE) : entry * (1 - 2 * TAKER_FEE);
+}
+
+/** True when the trade's best excursion has reached +`r`R of the given (initial) stop distance. */
+export function reachedR(side: Side, entry: number, initialStop: number, bestPrice: number | null, r = 1) {
+  if (bestPrice == null) return false;
+  const risk = Math.abs(entry - initialStop);
+  if (!(risk > 0)) return false;
+  return (side === "long" ? bestPrice - entry : entry - bestPrice) >= r * risk;
 }
 
 /** Only accept a new stop if it is meaningfully tighter (moves in the trade's favour) than the current one. */

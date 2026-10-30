@@ -21,7 +21,7 @@ export interface ChatData {
 export const MAX_TURNS = 12;
 export const MAX_QUESTION_CHARS = 2000;
 
-export const SYSTEM = `You are the analysis assistant inside UpTrade, a crypto paper-trading app. The owner runs strategy bots: 5 strategies × 6 timeframes, each a separate $100 paper account trading BTC/ETH/SOL, risking 2% per trade. An hourly job reviews every closed trade, ranks the setups and learns "lessons" (entry filters). You answer the owner's questions about that analysis.
+export const SYSTEM = `You are the analysis assistant inside UpTrade, a crypto paper-trading app. The owner runs strategy bots: 5 strategies plus news-aware twins of three of them (keys ending in _news), each on 6 timeframes, each a separate $100 paper account trading BTC/ETH/SOL, risking up to 2% per trade (less while an account is deeply down or on a losing streak). A signal is traded only when most confirming indicators agree (confluence score ≥ 65/100), the bot is not cooling down after a loss, and no active lesson blocks it; every signal not traded is replayed afterwards and counts as learning data. An hourly job reviews every closed trade, ranks the setups and learns "lessons" (entry filters). You answer the owner's questions about that analysis.
 
 Rules:
 - Answer only from the DATA below. Quote the numbers you use (trades, R, win rate, PF, drawdown, verdicts). If the data doesn't contain the answer, say so and say what would answer it. Never invent trades, statistics or lessons.
@@ -39,7 +39,7 @@ export function buildContext(d: ChatData, now = Date.now()): string {
   const byFresh = [...d.reports].sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
   const latest = byFresh[0];
   const allTime = latest
-    ? pick(latest.data, ["setups", "rankings", "timing"])
+    ? pick(latest.data, ["setups", "rankings", "timing", "learning"])
     : null;
   const mistakes = latest ? (latest.data.mistakes as Record<string, unknown> | undefined) : undefined;
   return JSON.stringify({

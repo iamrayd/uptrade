@@ -1,20 +1,27 @@
 import type { Candle, ExitReason, Side, StrategyDef } from "./types.ts";
-import { checkExit, MAKER_FEE, TAKER_FEE, tighterStop } from "./risk.ts";
+import { breakevenStop, checkExit, MAKER_FEE, reachedR, TAKER_FEE, tighterStop } from "./risk.ts";
+import { baseKey, CONFLUENCE } from "./confluence.ts";
 
 // Performance analysis and learning for the strategy bots. Pure functions, no I/O,
 // so the analyzer (analyze.ts), the live engine (tick.ts) and the tests share them.
 //
 //  - entryFeatures: the scale-free facts about an entry (stop width, trend strength,
-//    session, …) that lessons can filter on. The same function runs on a live
-//    signal and on a journaled trade, so a lesson means the same thing in both places.
+//    session, confluence score, news, …) that lessons can filter on. The same function
+//    runs on a live signal and on a journaled trade, so a lesson means the same thing
+//    in both places.
+//  - mistake tags: named, a-priori entry mistakes (stop inside the noise, weak trend, …).
+//    Each is also a yes/no feature, so a recurring mistake becomes a lesson with far fewer
+//    guesses (and a lower statistical bar) than a blind search over thresholds.
 //  - reviewTrade:   a post-mortem of one closed trade: what went wrong, why, and the fix.
 //  - setupStats / rankSetups: robust scores for each strategy × timeframe. A setup only
 //    ranks high if its edge survives a confidence bound, extra slippage and drawdown.
-//  - mineLessons / evaluateRule: entry filters learned from losing trades. A filter is
-//    learned on the oldest 70% of a setup's trades and must also hold on the newest 30%,
-//    which it never saw, before the bots use it.
-//  - simulateSignal: what a signal a lesson blocked would have done, so lessons that
-//    turn out to cost money get retired.
+//  - mineLessons / evaluateRule: entry filters learned from losing trades AND from shadow
+//    signals (entries a gate blocked, or a busted bot could not take, replayed afterwards),
+//    so a bot keeps learning when it trades little. A filter is learned on the oldest 70%
+//    of the data and must also hold on the newest 30%, which it never saw, before it is used.
+//  - simulateSignal: what a blocked signal would have done, so lessons that turn out to
+//    cost money get retired.
+//  - lessonImpact / tagStats: did entries get better after the lessons switched on?
 
 // ───────────────────────── Inputs ─────────────────────────
 
@@ -60,11 +67,33 @@ export const FEATURES: Record<string, { label: string; kind: "number" | "categor
   volumeX: { label: "volume vs its 20-bar average", kind: "number", unit: "×" },
   trendDistPct: { label: "distance from EMA 200 in the trade's direction", kind: "number", unit: "%" },
   bandWidthPct: { label: "Bollinger band width", kind: "number", unit: "% of price" },
+  confluence: { label: "confluence score (indicators that agree)", kind: "number", unit: "of 100" },
+  htfAlign: { label: "next-timeframe-up trend vs the trade (1 with, 0 mixed, −1 against)", kind: "number" },
+  newsScore: { label: "crypto-news sentiment in the trade's direction (−1 to +1)", kind: "number" },
+  newsRisk: { label: "recent high-impact news risk (0 to 1)", kind: "number" },
+  fng: { label: "Fear & Greed index", kind: "number" },
   side: { label: "direction", kind: "category" },
   symbol: { label: "coin", kind: "category" },
   session: { label: "UTC session", kind: "category" },
   weekend: { label: "weekend", kind: "category" },
 };
+
+// Each confluence check's own result (confluence.ts stores them as cf_<key> = 1/0 with every
+// entry), as a yes/no lesson feature. Weight-0 checks become learnable this way.
+const CF_CHECKS: Record<string, string> = {
+  stopSane: "the stop clears normal noise",
+  trend200: "price on the trade's side of EMA 200",
+  emaStack: "EMA 50 stack agrees",
+  momentum: "MACD histogram points the trade's way",
+  strength: "ADX ≥ 20 with the DMI lead",
+  notStretched: "not a stretched chase",
+  volume: "volume not drying up",
+  supertrend: "Supertrend agrees",
+  htf: "the next timeframe up agrees",
+  range: "a range, not a trend (ADX ≤ 25)",
+  rsiTurn: "RSI already turning back",
+};
+for (const [k, label] of Object.entries(CF_CHECKS)) FEATURES[`cf_${k}`] = { label: `confluence check: ${label}`, kind: "category" };
 
 /** Market session of a UTC time: asia 00–07, europe 07–13, us 13–21, late 21–24. */
 export function sessionOf(ms: number) {
@@ -75,7 +104,7 @@ export function sessionOf(ms: number) {
 const round = (n: number, d = 4) => +n.toFixed(d);
 
 /** Scale-free features of an entry. Price-level indicators are turned into percentages so one rule works on every coin. */
-export function entryFeatures(a: { side: Side; entry: number; stop: number; symbol: string; at: number; indicators: Record<string, number> }): Record<string, FeatureValue> {
+export function entryFeatures(a: { side: Side; entry: number; stop: number; symbol: string; at: number; indicators: Record<string, number>; strategy?: string }): Record<string, FeatureValue> {
   const ind = a.indicators;
   const sign = a.side === "long" ? 1 : -1;
   const close = ind.close ?? a.entry;
@@ -94,11 +123,21 @@ export function entryFeatures(a: { side: Side; entry: number; stop: number; symb
   if (Number.isFinite(ind.plusDI) && Number.isFinite(ind.minusDI)) f.diEdge = round(sign * (ind.plusDI - ind.minusDI), 2);
   if (ind.ema200) f.trendDistPct = round(((sign * (close - ind.ema200)) / ind.ema200) * 100);
   if (ind.bbUpper && ind.bbLower && ind.bbMid) f.bandWidthPct = round(((ind.bbUpper - ind.bbLower) / ind.bbMid) * 100);
+  if (Number.isFinite(ind.cfScore)) f.confluence = ind.cfScore;
+  if (Number.isFinite(ind.cfHtf)) f.htfAlign = ind.cfHtf;
+  // The gate threshold this entry was judged against (per-setup); the low_confluence tag reads it.
+  if (Number.isFinite(ind.cfMin)) f.cfMin = ind.cfMin;
+  for (const k of Object.keys(CF_CHECKS)) if (Number.isFinite(ind[`cf_${k}`])) f[`cf_${k}`] = ind[`cf_${k}`] >= 1 ? "yes" : "no";
+  // News sentiment is stored for the market; as a feature it is signed by the trade's direction.
+  if (Number.isFinite(ind.newsScore)) f.newsScore = round(sign * ind.newsScore, 3);
+  if (Number.isFinite(ind.newsRisk)) f.newsRisk = round(ind.newsRisk, 3);
+  if (Number.isFinite(ind.fng)) f.fng = ind.fng;
+  if (a.strategy) Object.assign(f, tagFeatures(a.strategy, f));
   return f;
 }
 
 export const tradeFeatures = (t: AnalysisTrade) =>
-  entryFeatures({ side: t.side, entry: t.entry_price, stop: t.initial_stop, symbol: t.symbol, at: +new Date(t.opened_at), indicators: t.entry_indicators ?? {} });
+  entryFeatures({ side: t.side, entry: t.entry_price, stop: t.initial_stop, symbol: t.symbol, at: +new Date(t.opened_at), indicators: t.entry_indicators ?? {}, strategy: t.strategy });
 
 // ───────────────────────── Lesson rules ─────────────────────────
 
@@ -121,6 +160,7 @@ export function ruleBlocks(rule: LessonRule, f: Record<string, FeatureValue>) {
 export function describeRule(rule: LessonRule) {
   const meta = FEATURES[rule.feature];
   const label = meta?.label ?? rule.feature;
+  if (rule.feature.startsWith("mk_") && rule.op === "eq") return `the entry shows the mistake "${label}"`;
   if (rule.op === "eq") return `${label} is ${rule.value}`;
   const unit = meta?.unit && meta.unit !== "×" ? ` ${meta.unit}` : meta?.unit ?? "";
   return `${label} ${rule.op === "lt" ? "below" : "at or above"} ${+(+rule.value).toPrecision(4)}${unit}`;
@@ -143,6 +183,8 @@ export interface TradeReview {
   afterExitBars: number | null;
   /** Context that made the entry weaker, from the entry's own indicator readings. */
   flags: string[];
+  /** Machine-readable keys of the mistakes in `flags` (see MISTAKE_TAGS). */
+  tags?: string[];
 }
 
 export const REVIEW_CATEGORIES: Record<string, { title: string; fix: string }> = {
@@ -187,7 +229,8 @@ export function reviewTrade(t: AnalysisTrade, after: Candle[] = []): TradeReview
   const tpR = t.take_profit != null ? toR(t, t.take_profit) : null;
   const runTarget = Math.max(1.5, tpR ?? 0);
   const f = tradeFeatures(t);
-  const flags = contextFlags(t.strategy, f);
+  const tagged = mistakeTags(t.strategy, f);
+  const flags = tagged.map((m) => m.text);
   const fmt = (n: number | null) => (n == null ? "?" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}R`);
 
   let category: string;
@@ -233,35 +276,158 @@ export function reviewTrade(t: AnalysisTrade, after: Candle[] = []): TradeReview
     why = `Moved ${fmt(mfeR)} in favour, then reversed to the stop for ${fmt(r)}.`;
   }
   const meta = REVIEW_CATEGORIES[category];
-  return { v: 1, outcome, category, title: meta.title, why, fix: meta.fix, mfeR, maeR, afterExitR, afterExitBars: after.length || null, flags };
+  return { v: 1, outcome, category, title: meta.title, why, fix: meta.fix, mfeR, maeR, afterExitR, afterExitBars: after.length || null, flags, tags: tagged.map((m) => m.tag) };
 }
 
 const TREND_STRATS = new Set(["ema_trend", "macd_adx", "supertrend", "donchian"]);
 
-/** Plain-language warnings about the entry context, from the readings at the signal. */
-export function contextFlags(strategy: string, f: Record<string, FeatureValue>): string[] {
-  const out: string[] = [];
-  const n = (k: string) => (typeof f[k] === "number" ? (f[k] as number) : null);
-  const stopAtr = n("stopAtr");
-  if (stopAtr != null && stopAtr < 1) out.push(`The stop was only ${stopAtr.toFixed(2)} ATR away: inside normal bar-to-bar noise.`);
-  const adx = n("adx14");
-  if (adx != null && TREND_STRATS.has(strategy) && adx < 20) out.push(`ADX was ${adx.toFixed(1)}: a weak trend for a trend-following entry.`);
-  if (adx != null && strategy === "bb_rsi" && adx > 28) out.push(`ADX was ${adx.toFixed(1)}: a fairly strong trend to fade.`);
-  const rsi = n("rsi");
-  if (rsi != null && strategy !== "bb_rsi") {
-    if (f.side === "long" && rsi > 70) out.push(`RSI was ${rsi.toFixed(0)} on a long: buying an already stretched move.`);
-    if (f.side === "short" && rsi < 30) out.push(`RSI was ${rsi.toFixed(0)} on a short: selling an already stretched move.`);
+// ───────────────────────── Mistake tags ─────────────────────────
+
+export interface MistakeTagDef {
+  key: string;
+  /** Short name; also the lesson's wording ("the entry shows the mistake …"). */
+  label: string;
+  /** The sentence when the entry shows this mistake, "" when it does not, null when it can't be told (feature missing or not applicable). */
+  test(strategy: string, f: Record<string, FeatureValue>): string | null;
+}
+
+const fnum = (f: Record<string, FeatureValue>, k: string) => (typeof f[k] === "number" ? (f[k] as number) : null);
+
+/** The entry mistakes the bots are known to make, in the order they are listed. Strategy keys are matched without the "_news" suffix. */
+export const MISTAKE_TAGS: MistakeTagDef[] = [
+  {
+    key: "noise_stop",
+    label: "stop inside the noise",
+    test: (_s, f) => {
+      const v = fnum(f, "stopAtr");
+      return v == null ? null : v < 1 ? `The stop was only ${v.toFixed(2)} ATR away: inside normal bar-to-bar noise.` : "";
+    },
+  },
+  {
+    key: "weak_trend",
+    label: "weak trend for a trend entry",
+    test: (s, f) => {
+      const v = fnum(f, "adx14");
+      return v == null || !TREND_STRATS.has(baseKey(s)) ? null : v < 20 ? `ADX was ${v.toFixed(1)}: a weak trend for a trend-following entry.` : "";
+    },
+  },
+  {
+    key: "fading_trend",
+    label: "fading a strong trend",
+    test: (s, f) => {
+      const v = fnum(f, "adx14");
+      return v == null || baseKey(s) !== "bb_rsi" ? null : v > 28 ? `ADX was ${v.toFixed(1)}: a fairly strong trend to fade.` : "";
+    },
+  },
+  {
+    key: "stretched_entry",
+    label: "chasing a stretched move",
+    test: (s, f) => {
+      const v = fnum(f, "rsi");
+      if (v == null || baseKey(s) === "bb_rsi" || (f.side !== "long" && f.side !== "short")) return null;
+      if (f.side === "long" && v > 70) return `RSI was ${v.toFixed(0)} on a long: buying an already stretched move.`;
+      if (f.side === "short" && v < 30) return `RSI was ${v.toFixed(0)} on a short: selling an already stretched move.`;
+      return "";
+    },
+  },
+  {
+    key: "counter_trend",
+    label: "against the EMA 200 trend",
+    test: (s, f) => {
+      const v = fnum(f, "trendDistPct");
+      if (v == null) return null;
+      // A fade trades against the trend by design; it only counts when it is far against it.
+      const limit = baseKey(s) === "bb_rsi" ? -5 : 0;
+      return v < limit ? `The entry was against the EMA 200 trend (${v.toFixed(2)}%).` : "";
+    },
+  },
+  {
+    key: "late_entry",
+    label: "late entry in an extended trend",
+    test: (_s, f) => {
+      const v = fnum(f, "trendDistPct");
+      return v == null ? null : v > 8 ? `Price was already ${v.toFixed(1)}% past EMA 200: a late entry in an extended trend.` : "";
+    },
+  },
+  {
+    key: "thin_volume",
+    label: "below-average volume",
+    test: (_s, f) => {
+      const v = fnum(f, "volumeX");
+      return v == null ? null : v < 1 ? `Volume was below average (${v.toFixed(2)}×).` : "";
+    },
+  },
+  {
+    key: "dmi_against",
+    label: "DMI favoured the other side",
+    test: (s, f) => {
+      const v = fnum(f, "diEdge");
+      return v == null || baseKey(s) === "bb_rsi" ? null : v < 0 ? "The DMI favoured the other direction." : "";
+    },
+  },
+  {
+    key: "weekend",
+    label: "weekend entry",
+    test: (_s, f) => (f.weekend == null ? null : f.weekend === "yes" ? "Weekend entry: thinner liquidity." : ""),
+  },
+  {
+    key: "low_confluence",
+    label: "too few indicators agreed",
+    test: (_s, f) => {
+      const v = fnum(f, "confluence");
+      const min = fnum(f, "cfMin") ?? CONFLUENCE.minScore;
+      return v == null ? null : v < min ? `Only ${v.toFixed(0)}/100 of the confirming indicators agreed (this setup needs ${min}).` : "";
+    },
+  },
+  {
+    key: "htf_conflict",
+    label: "against the higher-timeframe trend",
+    test: (_s, f) => {
+      const v = fnum(f, "htfAlign");
+      return v == null ? null : v < 0 ? "The next timeframe up was trending against this entry." : "";
+    },
+  },
+  {
+    key: "bad_news",
+    label: "news was against the trade",
+    test: (_s, f) => {
+      const v = fnum(f, "newsScore");
+      return v == null ? null : v <= -0.25 ? `Crypto news leaned against this direction (${v.toFixed(2)}).` : "";
+    },
+  },
+  {
+    key: "event_risk",
+    label: "entered into a news event",
+    test: (_s, f) => {
+      const v = fnum(f, "newsRisk");
+      return v == null ? null : v >= 0.4 ? "A high-impact news event was fresh when this entry was taken." : "";
+    },
+  },
+];
+
+// Each tag is also a yes/no lesson feature.
+for (const t of MISTAKE_TAGS) FEATURES[`mk_${t.key}`] = { label: t.label, kind: "category" };
+
+/** yes/no features for every tag that can be told for this entry. */
+export function tagFeatures(strategy: string, f: Record<string, FeatureValue>): Record<string, FeatureValue> {
+  const out: Record<string, FeatureValue> = {};
+  for (const t of MISTAKE_TAGS) {
+    const r = t.test(strategy, f);
+    if (r != null) out[`mk_${t.key}`] = r ? "yes" : "no";
   }
-  const td = n("trendDistPct");
-  if (td != null && td < 0) out.push(`The entry was against the EMA 200 trend (${td.toFixed(2)}%).`);
-  if (td != null && td > 8) out.push(`Price was already ${td.toFixed(1)}% past EMA 200: a late entry in an extended trend.`);
-  const vx = n("volumeX");
-  if (vx != null && vx < 1) out.push(`Volume was below average (${vx.toFixed(2)}×).`);
-  const di = n("diEdge");
-  if (di != null && di < 0) out.push("The DMI favoured the other direction.");
-  if (f.weekend === "yes") out.push("Weekend entry: thinner liquidity.");
   return out;
 }
+
+/** The mistakes this entry shows, with a plain-language sentence each. */
+export function mistakeTags(strategy: string, f: Record<string, FeatureValue>): { tag: string; label: string; text: string }[] {
+  return MISTAKE_TAGS.flatMap((t) => {
+    const r = t.test(strategy, f);
+    return r ? [{ tag: t.key, label: t.label, text: r }] : [];
+  });
+}
+
+/** Plain-language warnings about the entry context, from the readings at the signal. */
+export const contextFlags = (strategy: string, f: Record<string, FeatureValue>): string[] => mistakeTags(strategy, f).map((m) => m.text);
 
 // ───────────────────────── Setup statistics and ranking ─────────────────────────
 
@@ -523,35 +689,47 @@ export function timing(trades: AnalysisTrade[]) {
 // ───────────────────────── Learning: entry filters ─────────────────────────
 
 export const LEARN = {
-  /** Trades a scope needs before anything is learned from it. */
+  /** Entries (trades plus replayed shadow signals) a scope needs before anything is learned from it. */
   minTrades: 30,
   /** Oldest share used to learn; the rest is the out-of-sample check. */
   trainShare: 0.7,
   /** A filter may skip at most this share of the training entries. */
   maxBlockedShare: 0.5,
-  /** Blocked training trades must average at most this R. */
+  /** Blocked training entries must average at most this R. */
   maxBlockedAvgR: -0.25,
-  /** Kept training trades must beat the scope's average by this much R. */
+  /** Kept training entries must beat the scope's average by this much R. */
   minLift: 0.1,
   /** Total R the filter must have saved in training. */
   minSavedR: 2,
   /**
-   * Welch t-statistic (kept vs blocked R) the filter needs on the training trades. Dozens of
+   * Welch t-statistic (kept vs blocked R) the filter needs on the training entries. Dozens of
    * candidate filters are tried per setup, so a plain 95% bar would pass noise; ~3 is roughly
    * a Bonferroni-corrected bar for that many tries.
    */
   minTrainT: 3,
-  /** Out-of-sample trades the filter must block to count as confirmed. */
+  /** Out-of-sample entries the filter must block to count as confirmed. */
   minTestBlocked: 4,
-  /** Welch t-statistic the filter needs on the newer trades (same direction, weaker bar). */
+  /** Welch t-statistic the filter needs on the newer entries (same direction, weaker bar). */
   minTestT: 1,
-  /** Active lessons per account, so the bots can't filter themselves out of trading. */
-  maxActivePerAccount: 3,
+  /** Active lessons per setup. A backstop: maxTotalBlockShare is the real guard against filtering a bot out of trading. */
+  maxActivePerAccount: 8,
+  /** All active lessons together may skip at most this share of a setup's signals. */
+  maxTotalBlockShare: 0.6,
   /** Blocked signals checked before a lesson can be retired. */
   retireAfter: 8,
-  /** Retire when the signals a lesson blocked would have averaged at least this R. */
+  /** Retire when the signals a lesson blocked would have averaged at least this R (after slippage). */
   retireAvgR: 0.1,
+  /** A lesson is also judged on its latest blocked signals, so a filter that stopped working is caught even when its early record was good. */
+  retireWindow: 12,
 };
+
+/**
+ * Mistake-tag lessons test one of ~13 named, a-priori hypotheses instead of dozens of blind
+ * thresholds, so the multiple-comparison burden is far lower and the bars can be, too.
+ */
+export const LEARN_TAG: typeof LEARN = { ...LEARN, minTrades: 20, maxBlockedAvgR: -0.15, minSavedR: 1.5, minTrainT: 2, minTestBlocked: 3 };
+
+const cfgFor = (rule: Pick<LessonRule, "feature">) => (rule.feature.startsWith("mk_") ? LEARN_TAG : LEARN);
 
 export interface RuleEvidence {
   train: { n: number; blocked: number; blockedAvgR: number; keptAvgR: number; allAvgR: number; savedR: number; t: number };
@@ -576,17 +754,50 @@ export function welchT(kept: number[], blocked: number[]) {
   return (mean(kept) - mean(blocked)) / Math.sqrt(v(kept) / kept.length + v(blocked) / blocked.length);
 }
 
-type Row = { r: number; f: Record<string, FeatureValue> };
-const toRows = (trades: AnalysisTrade[]): Row[] =>
-  [...trades].sort((x, y) => +new Date(x.opened_at) - +new Date(y.opened_at)).map((t) => ({ r: slippedR(t), f: tradeFeatures(t) }));
-
-/** Checks a rule on a scope's trades (oldest first): learned on the first 70%, confirmed on the rest. */
-export function evaluateRule(trades: AnalysisTrade[], rule: LessonRule): RuleEvidence {
-  return evaluateRows(toRows(trades), rule);
+/**
+ * A signal the bot did not trade, replayed afterwards (bot_filtered_signals). It is learning data
+ * like a trade: a busted bot, a gate and a lesson all leave these behind.
+ */
+export interface ShadowSignal {
+  id?: string;
+  strategy: string;
+  timeframe: string;
+  features: Record<string, FeatureValue>;
+  /** R of the replay, after slippage. */
+  outcome_r: number;
+  /** Why it was not traded: lesson | confluence | cooldown | news | busted. */
+  reason: string;
+  signal_bar_time: string;
+  lesson_ids?: string[];
 }
 
-function evaluateRows(rows: Row[], rule: LessonRule): RuleEvidence {
-  const cut = Math.floor(rows.length * LEARN.trainShare);
+interface Row {
+  r: number;
+  f: Record<string, FeatureValue>;
+  /** Entry time (ms): what the oldest-first split orders by. */
+  t: number;
+  strategy: string;
+  timeframe: string;
+}
+
+const tradeRow = (t: AnalysisTrade): Row => ({ r: slippedR(t), f: tradeFeatures(t), t: +new Date(t.opened_at), strategy: t.strategy, timeframe: t.timeframe });
+// Tags are recomputed so signals logged before a tag existed still carry it.
+const shadowRow = (s: ShadowSignal): Row => ({
+  r: s.outcome_r,
+  f: { ...s.features, ...tagFeatures(s.strategy, s.features) },
+  t: +new Date(s.signal_bar_time),
+  strategy: s.strategy,
+  timeframe: s.timeframe,
+});
+const toRows = (trades: AnalysisTrade[], shadow: ShadowSignal[] = []): Row[] => [...trades.map(tradeRow), ...shadow.map(shadowRow)].sort((x, y) => x.t - y.t);
+
+/** Checks a rule on a scope's entries (oldest first): learned on the first 70%, confirmed on the rest. */
+export function evaluateRule(trades: AnalysisTrade[], rule: LessonRule, shadow: ShadowSignal[] = []): RuleEvidence {
+  return evaluateRows(toRows(trades, shadow), rule);
+}
+
+function evaluateRows(rows: Row[], rule: LessonRule, cfg: typeof LEARN = cfgFor(rule)): RuleEvidence {
+  const cut = Math.floor(rows.length * cfg.trainShare);
   const train = rows.slice(0, cut);
   const test = rows.slice(cut);
   const [tb, tk] = split(train, (x) => ruleBlocks(rule, x.f));
@@ -607,40 +818,40 @@ function evaluateRows(rows: Row[], rule: LessonRule): RuleEvidence {
   };
   const t = ev.train;
   const fail = (why: string) => ({ ...ev, why });
-  if (rows.length < LEARN.minTrades) return fail(`needs ${LEARN.minTrades} trades, has ${rows.length}`);
-  if (t.blocked < Math.max(5, 0.1 * t.n)) return fail("blocks too few training trades");
-  if (t.blocked > LEARN.maxBlockedShare * t.n) return fail("would skip too many entries");
-  if (t.blockedAvgR > LEARN.maxBlockedAvgR) return fail("the trades it blocks weren't bad enough");
-  if (t.keptAvgR - t.allAvgR < LEARN.minLift) return fail("doesn't lift the remaining trades enough");
-  if (t.savedR < LEARN.minSavedR) return fail("saves too little R");
-  if (t.t < LEARN.minTrainT) return fail(`not statistically clear (t = ${t.t.toFixed(1)}, need ${LEARN.minTrainT})`);
+  if (rows.length < cfg.minTrades) return fail(`needs ${cfg.minTrades} entries, has ${rows.length}`);
+  if (t.blocked < Math.max(5, 0.1 * t.n)) return fail("blocks too few training entries");
+  if (t.blocked > cfg.maxBlockedShare * t.n) return fail("would skip too many entries");
+  if (t.blockedAvgR > cfg.maxBlockedAvgR) return fail("the entries it blocks weren't bad enough");
+  if (t.keptAvgR - t.allAvgR < cfg.minLift) return fail("doesn't lift the remaining entries enough");
+  if (t.savedR < cfg.minSavedR) return fail("saves too little R");
+  if (t.t < cfg.minTrainT) return fail(`not statistically clear (t = ${t.t.toFixed(1)}, need ${cfg.minTrainT})`);
   const s = ev.test;
-  if (s.blocked < LEARN.minTestBlocked) return fail("not enough newer trades to confirm it");
-  if ((s.blockedAvgR ?? 0) >= 0) return fail("the newer trades it would block were not losers");
-  if ((s.keptAvgR ?? -9) <= s.allAvgR) return fail("doesn't improve the newer trades");
-  if (s.t < LEARN.minTestT) return fail(`too weak on the newer trades (t = ${s.t.toFixed(1)})`);
-  return { ...ev, passed: true, why: "confirmed on newer trades" };
+  if (s.blocked < cfg.minTestBlocked) return fail("not enough newer entries to confirm it");
+  if ((s.blockedAvgR ?? 0) >= 0) return fail("the newer entries it would block were not losers");
+  if ((s.keptAvgR ?? -9) <= s.allAvgR) return fail("doesn't improve the newer entries");
+  if (s.t < cfg.minTestT) return fail(`too weak on the newer entries (t = ${s.t.toFixed(1)})`);
+  return { ...ev, passed: true, why: "confirmed on newer entries" };
 }
 
 /** Candidate rules for a scope: quantile thresholds on numeric features, every value of categorical ones. */
-export function candidateRules(trades: AnalysisTrade[]): LessonRule[] {
-  return candidatesFromRows(toRows(trades));
+export function candidateRules(trades: AnalysisTrade[], shadow: ShadowSignal[] = []): LessonRule[] {
+  return candidatesFromRows(toRows(trades, shadow));
 }
 
 function candidatesFromRows(rows: Row[]): LessonRule[] {
   const feats = rows.map((x) => x.f);
-  const trades = rows;
   const out: LessonRule[] = [];
   for (const [key, meta] of Object.entries(FEATURES)) {
     const vals = feats.map((f) => f[key]).filter((v) => v != null);
-    if (vals.length < 0.9 * trades.length) continue;
+    if (vals.length < 0.9 * rows.length) continue;
     if (meta.kind === "category") {
       const counts = new Map<string, number>();
       for (const v of vals) counts.set(String(v), (counts.get(String(v)) ?? 0) + 1);
       if (counts.size < 2) continue;
-      for (const [v, c] of counts) if (c >= 5) out.push({ feature: key, op: "eq", value: v });
+      // A mistake tag only ever blocks the entries that show it.
+      for (const [v, c] of counts) if (c >= 5 && (!key.startsWith("mk_") || v === "yes")) out.push({ feature: key, op: "eq", value: v });
     } else {
-      const nums = (vals as number[]).slice(0, Math.floor(trades.length * LEARN.trainShare)).sort((a, b) => a - b);
+      const nums = (vals as number[]).slice(0, Math.floor(rows.length * LEARN.trainShare)).sort((a, b) => a - b);
       if (nums.length < 10) continue;
       const qs = new Set<number>();
       for (let q = 0.2; q <= 0.81; q += 0.1) qs.add(+nums[Math.floor(q * (nums.length - 1))].toPrecision(3));
@@ -668,8 +879,8 @@ export function lessonText(strategy: string, timeframe: string | null, rule: Les
   return {
     title: `${scope}: skip entries when ${describeRule(rule)}`,
     explanation:
-      `Losing entries clustered where ${describeRule(rule)}: on the older ${ev.train.n} trades, the ${ev.train.blocked} such entries averaged ${r(ev.train.blockedAvgR)} ` +
-      `vs ${r(ev.train.keptAvgR)} for the rest (${ev.train.savedR.toFixed(1)}R lost). It held on the ${ev.test.n} newer trades it wasn't learned from: ` +
+      `Losing entries clustered where ${describeRule(rule)}: on the older ${ev.train.n} entries (trades plus skipped signals that were replayed), the ${ev.train.blocked} such entries averaged ${r(ev.train.blockedAvgR)} ` +
+      `vs ${r(ev.train.keptAvgR)} for the rest (${ev.train.savedR.toFixed(1)}R lost). It held on the ${ev.test.n} newer entries it wasn't learned from: ` +
       `${ev.test.blocked} such entries averaged ${r(ev.test.blockedAvgR)} vs ${r(ev.test.keptAvgR)} for the rest. R includes ${SLIPPAGE * 100}% slippage per side.`,
   };
 }
@@ -677,31 +888,42 @@ export function lessonText(strategy: string, timeframe: string | null, rule: Les
 /**
  * Learns at most one new filter per scope (strategy × timeframe, then strategy-wide).
  * `taken` holds "strategy|timeframe|feature|op" keys that already have a lesson.
- * Trades that a current lesson (`inForce`: active or proposed) would have skipped are left
- * out, so each new lesson targets the losers the existing ones still let through.
+ * Entries that a current lesson (`inForce`: active or proposed) would have skipped are left
+ * out, so each new lesson targets the losers the existing ones still let through. Shadow
+ * signals count as entries, so a bot that trades little (or is busted) still has data.
+ * A new lesson is refused if, with the existing ones, it would skip more than
+ * LEARN.maxTotalBlockShare of the scope's signals.
  */
 export function mineLessons(
   trades: AnalysisTrade[],
   taken: Set<string>,
   inForce: (LessonRule & { strategy: string; timeframe: string | null })[] = [],
+  shadow: ShadowSignal[] = [],
 ): MinedLesson[] {
-  const scopes = new Map<string, AnalysisTrade[]>();
-  for (const t of trades) {
-    const f = inForce.length ? tradeFeatures(t) : null;
-    if (f && inForce.some((l) => l.strategy === t.strategy && (l.timeframe == null || l.timeframe === t.timeframe) && ruleBlocks(l, f))) continue;
-    for (const k of [`${t.strategy}|${t.timeframe}`, `${t.strategy}|*`]) scopes.set(k, [...(scopes.get(k) ?? []), t]);
+  const scopes = new Map<string, { all: number; kept: Row[] }>();
+  for (const x of toRows(trades, shadow)) {
+    const blocked = inForce.some((l) => l.strategy === x.strategy && (l.timeframe == null || l.timeframe === x.timeframe) && ruleBlocks(l, x.f));
+    for (const k of [`${x.strategy}|${x.timeframe}`, `${x.strategy}|*`]) {
+      const sc = scopes.get(k) ?? { all: 0, kept: [] };
+      sc.all++;
+      if (!blocked) sc.kept.push(x);
+      scopes.set(k, sc);
+    }
   }
   const out: MinedLesson[] = [];
-  for (const [k, list] of scopes) {
-    if (list.length < LEARN.minTrades) continue;
+  for (const [k, sc] of scopes) {
+    const rows = sc.kept;
+    if (rows.length < LEARN_TAG.minTrades) continue;
     const [strategy, tf] = k.split("|");
     const timeframe = tf === "*" ? null : tf;
+    const alreadyBlocked = sc.all - rows.length;
     let best: { rule: LessonRule; ev: RuleEvidence } | null = null;
-    const rows = toRows(list);
     for (const rule of candidatesFromRows(rows)) {
       if (taken.has(lessonKey(strategy, timeframe, rule))) continue;
       const ev = evaluateRows(rows, rule);
-      if (ev.passed && (!best || ev.train.savedR > best.ev.train.savedR)) best = { rule, ev };
+      if (!ev.passed || (best && ev.train.savedR <= best.ev.train.savedR)) continue;
+      if (alreadyBlocked + rows.filter((x) => ruleBlocks(rule, x.f)).length > LEARN.maxTotalBlockShare * sc.all) continue;
+      best = { rule, ev };
     }
     if (!best) continue;
     taken.add(lessonKey(strategy, timeframe, best.rule));
@@ -713,15 +935,86 @@ export function mineLessons(
 export const lessonKey = (strategy: string, timeframe: string | null, rule: Pick<LessonRule, "feature" | "op">) =>
   `${strategy}|${timeframe ?? "*"}|${rule.feature}|${rule.op}`;
 
+// ───────────────────────── Did the lessons help? ─────────────────────────
+
+export interface ImpactRow {
+  strategy: string;
+  timeframe: string;
+  /** Active lessons that apply to this setup. */
+  lessons: number;
+  /** When the first of them switched on. */
+  since: string;
+  before: { n: number; avgR: number | null };
+  after: { n: number; avgR: number | null };
+}
+
+/**
+ * Per setup with active lessons: average R (after slippage) of the last `window` trades opened
+ * before the first lesson switched on vs every trade opened since. A small `after.n` means the
+ * lessons have not been tested by many trades yet.
+ */
+export function lessonImpact(
+  trades: AnalysisTrade[],
+  lessons: { strategy: string; timeframe: string | null; status: string; activated_at: string | null }[],
+  setups: { strategy: string; timeframe: string }[],
+  window = 30,
+): ImpactRow[] {
+  const out: ImpactRow[] = [];
+  for (const s of setups) {
+    const mine = lessons.filter((l) => l.status === "active" && l.activated_at && l.strategy === s.strategy && (l.timeframe == null || l.timeframe === s.timeframe));
+    if (!mine.length) continue;
+    const since = Math.min(...mine.map((l) => +new Date(l.activated_at!)));
+    const list = trades.filter((t) => t.strategy === s.strategy && t.timeframe === s.timeframe).sort((x, y) => +new Date(x.opened_at) - +new Date(y.opened_at));
+    const before = list.filter((t) => +new Date(t.opened_at) < since).slice(-window);
+    const after = list.filter((t) => +new Date(t.opened_at) >= since);
+    const m = (l: AnalysisTrade[]) => (l.length ? mean(l.map(slippedR)) : null);
+    out.push({ strategy: s.strategy, timeframe: s.timeframe, lessons: mine.length, since: new Date(since).toISOString(), before: { n: before.length, avgR: m(before) }, after: { n: after.length, avgR: m(after) } });
+  }
+  return out;
+}
+
+export interface TagStat {
+  tag: string;
+  label: string;
+  /** Entries showing the mistake / not showing it, with their average R after slippage. */
+  withN: number;
+  withAvgR: number | null;
+  withoutN: number;
+  withoutAvgR: number | null;
+  /** Total R the entries showing the mistake lost relative to the rest: withN × (withoutAvgR − withAvgR). */
+  costR: number;
+}
+
+/** How costly each mistake has been across trades and replayed signals, worst first. */
+export function tagStats(trades: AnalysisTrade[], shadow: ShadowSignal[] = []): TagStat[] {
+  const rows = toRows(trades, shadow);
+  return MISTAKE_TAGS.map((t) => {
+    const key = `mk_${t.key}`;
+    const w = rows.filter((x) => x.f[key] === "yes");
+    const o = rows.filter((x) => x.f[key] === "no");
+    const wa = avgR(w);
+    const oa = avgR(o);
+    return { tag: t.key, label: t.label, withN: w.length, withAvgR: wa, withoutN: o.length, withoutAvgR: oa, costR: wa == null || oa == null ? 0 : +(w.length * (oa - wa)).toFixed(2) };
+  })
+    .filter((x) => x.withN > 0)
+    .sort((a, b) => b.costR - a.costR);
+}
+
 // ───────────────────────── Counterfactual of a blocked signal ─────────────────────────
 
 export interface SimResult {
   /** False while the trade would still be open (wait for more bars). */
   done: boolean;
+  /** R after fees only, the way the live engine computes it. */
   r: number;
+  /** R after fees and SLIPPAGE per side: the same basis lessons are learned on, so use this to judge them. */
+  rSlip: number;
   reason: ExitReason | "open";
   bars: number;
 }
+
+/** How long a replayed signal is followed: about a week of bars, between 24 and 200. Bounds how long a signal stays unresolved. */
+export const replayBars = (secondsPerBar: number) => Math.max(24, Math.min(200, Math.floor((7 * 86400) / secondsPerBar)));
 
 /**
  * Replays a signal a lesson blocked, with the strategy's own management, on the
@@ -735,14 +1028,18 @@ export function simulateSignal(
   signalIdx: number,
   sig: { side: Side; entry: number; stop: number; takeProfit: number | null },
   maxBars = 200,
+  /** Also apply the breakeven rule: stop to fee cover once the trade reaches +1R (judging exit management). */
+  breakeven = false,
 ): SimResult {
   const { side, entry } = sig;
   let stop = sig.stop;
   let trailed = false;
+  let best: number | null = null;
   const risk = Math.abs(entry - sig.stop) + entry * TAKER_FEE + sig.stop * TAKER_FEE;
   const result = (exit: number, feeRate: number, reason: ExitReason, bars: number): SimResult => {
     const pnl = side === "long" ? exit - entry : entry - exit;
-    return { done: true, r: round((pnl - entry * TAKER_FEE - exit * feeRate) / risk, 3), reason, bars };
+    const r = (pnl - entry * TAKER_FEE - exit * feeRate) / risk;
+    return { done: true, r: round(r, 3), rSlip: round(r - (SLIPPAGE * (entry + exit)) / risk, 3), reason, bars };
   };
   let pendingExit: ExitReason | null = null;
   for (let i = signalIdx + 1; i < candles.length; i++) {
@@ -752,11 +1049,19 @@ export function simulateSignal(
     const fill = checkExit({ side, stop, takeProfit: sig.takeProfit, liqPrice: 0, trailed }, c);
     if (fill) return result(fill.price, fill.feeRate === MAKER_FEE ? MAKER_FEE : TAKER_FEE, fill.reason, bars);
     if (bars >= maxBars) return result(c.close, TAKER_FEE, "time_exit", bars);
+    const hi = side === "long" ? c.high : c.low;
+    best = best == null ? hi : side === "long" ? Math.max(best, hi) : Math.min(best, hi);
     const hist = candles.slice(Math.max(0, i + 1 - 600), i + 1);
     const m = strategy.manage(hist, { side, entryPrice: entry, stop, takeProfit: sig.takeProfit, barsHeld: bars });
     if (m.exit) pendingExit = m.exit.reason;
     else {
-      const ns = tighterStop(side, stop, m.stop);
+      // The breakeven rule and the strategy's own trailing stop compete; the tighter one wins (like live).
+      let proposed = m.stop ?? undefined;
+      if (breakeven && reachedR(side, entry, sig.stop, best)) {
+        const be = breakevenStop(side, entry);
+        proposed = proposed == null ? be : side === "long" ? Math.max(proposed, be) : Math.min(proposed, be);
+      }
+      const ns = tighterStop(side, stop, proposed);
       if (ns != null) {
         if (side === "long" ? ns >= c.close : ns <= c.close) pendingExit = "trailing_stop";
         else {
@@ -766,5 +1071,5 @@ export function simulateSignal(
       }
     }
   }
-  return { done: false, r: 0, reason: "open", bars: candles.length - 1 - signalIdx };
+  return { done: false, r: 0, rSlip: 0, reason: "open", bars: candles.length - 1 - signalIdx };
 }

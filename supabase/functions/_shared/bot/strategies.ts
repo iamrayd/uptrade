@@ -352,6 +352,42 @@ export const supertrendStrat: StrategyDef = {
   },
 };
 
-export const STRATEGIES: StrategyDef[] = [emaTrend, bbRsi, donchian, macdAdx, supertrendStrat];
+// ───────────────────────── "+ News" twins ─────────────────────────
+
+/**
+ * The strategies that get a news twin: same trigger, stops and exits, plus the news gate
+ * (news.ts). Chosen from a 365-day backtest of all 30 setups: MACD+ADX and Donchian have the
+ * most profitable timeframes, and Supertrend 1d has the best profit factor. A twin is a new
+ * track record next to its original, so the two can be compared head to head.
+ */
+export const NEWS_TWINS = ["macd_adx", "donchian", "supertrend"];
+
+function withNews(base: StrategyDef): StrategyDef {
+  return {
+    ...base,
+    key: `${base.key}_news`,
+    name: `${base.name} + News`,
+    baseKey: base.key,
+    newsAware: true,
+    summary: `${base.summary} Also waits out fresh high-impact crypto news and does not trade against one-sided news.`,
+    rules: `${base.rules}
+
+**News filter** (this variant only; everything above is unchanged)
+- Headlines from CoinDesk, Cointelegraph and Decrypt are scored (bullish/bearish keywords, fading with a 6-hour half-life) for the coin, plus half of the market-wide news. The Fear & Greed index is recorded too.
+- *Wait out events:* no entry in either direction while the event risk is ≥ 0.55. A fresh hack, exploit, ban, lawsuit, depeg, delisting or trading halt keeps it above that for about two hours.
+- *Not against the news:* no long when the coin's news sentiment is ≤ −0.35, no short when it is ≥ +0.35.
+- If the news feed is down or older than 45 minutes, the bot trades on the indicators alone and says so in the journal.
+- *Forward test only:* there is no news history to backtest, so this variant is judged live, next to \`${base.key}\`.`,
+  };
+}
+
+export const STRATEGIES: StrategyDef[] = [
+  emaTrend,
+  bbRsi,
+  donchian,
+  macdAdx,
+  supertrendStrat,
+  ...[emaTrend, bbRsi, donchian, macdAdx, supertrendStrat].filter((s) => NEWS_TWINS.includes(s.key)).map(withNews),
+];
 export const STRATEGY_BY_KEY: Record<string, StrategyDef> = Object.fromEntries(STRATEGIES.map((s) => [s.key, s]));
 

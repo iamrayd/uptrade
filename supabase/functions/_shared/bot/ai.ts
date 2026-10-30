@@ -15,6 +15,9 @@ How to work:
 - Treat small samples as unproven. A setup with under 30 trades, or whose lcbRSlip is not positive, is not proven, however high its return. Say so plainly.
 - Rank for real trading: prefer edge that survives slippage (avgRSlip, lcbRSlip), consistency (positiveWeeksPct) and shallow drawdowns over raw return.
 - For mistakes, explain why the entries failed using the review categories, flags and examples, then give concrete, testable fixes, such as a parameter change, a filter, or a different stop or exit rule. Tie each fix to the strategy's actual rules.
+- The report's "learning" section shows whether the bots are improving: "impact" is the average R per trade before the first lesson switched on vs since, "tags" are the named mistakes ranked by the R they cost, "replayed" is what the signals the bots did not trade would have made, and "gate" compares the signals the indicator gate skipped with the trades it let through. Say plainly whether entries are getting better and by how much, and call it noise when fewer than 30 trades back it.
+- A strategy whose key ends in _news is the news-aware twin of the plain strategy with the same trigger. Compare each twin with its original on the same timeframe before saying news helps.
+- Features starting with mk_ are named entry mistakes (value "yes"); prefer them in candidate_filters when the mistakes data points to one.
 - candidate_filters are entry filters the bots could learn ("skip entries when <feature> <op> <value>"). Use only features from filterFeatures and the setups in the data. Suggest at most 3, and only where the mistakes or timing data point to them; it is fine to suggest none. Use timeframe "" for every timeframe of a strategy. Each one is tested on newer trades before it is used.
 - Write in plain, direct English for a trader. Keep each paragraph or item to one to three sentences.`;
 

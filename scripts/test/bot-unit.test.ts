@@ -76,11 +76,11 @@ test("sizing risks 2% of equity (fees included) with the lowest leverage that fi
 });
 
 test("tight stops use more leverage but never above the cap; wide stops get capped for liquidation safety", () => {
-  const tight = sizePosition({ side: "short", entry: 100, stop: 100.3, equity: 100, freeBalance: 100, stepSize: 0.001, settings: S });
+  const tight = sizePosition({ side: "short", entry: 100, stop: 100.45, equity: 100, freeBalance: 100, stepSize: 0.001, settings: S });
   if ("skip" in tight) throw new Error(tight.skip);
   assert.ok(tight.leverage <= 20);
   assert.ok(tight.margin + tight.entryFee <= 100 / 3 + 1e-9);
-  assert.ok(tight.liqPrice > 100.3);
+  assert.ok(tight.liqPrice > 100.45);
   assert.ok(tight.riskPctActual <= 0.02 + 1e-12);
 
   const wide = sizePosition({ side: "long", entry: 100, stop: 90, equity: 100, freeBalance: 100, stepSize: 0.001, settings: S });
@@ -90,7 +90,7 @@ test("tight stops use more leverage but never above the cap; wide stops get capp
 });
 
 test("when the margin budget can't carry 2% risk, size shrinks (never leverage above the cap)", () => {
-  const s = sizePosition({ side: "long", entry: 100, stop: 99.8, equity: 100, freeBalance: 100, stepSize: 0.001, settings: { ...S, maxLeverage: 5 } });
+  const s = sizePosition({ side: "long", entry: 100, stop: 99.55, equity: 100, freeBalance: 100, stepSize: 0.001, settings: { ...S, maxLeverage: 5 } });
   if ("skip" in s) throw new Error(s.skip);
   assert.equal(s.leverage, 5);
   assert.ok(s.riskPctActual < 0.02);
@@ -101,6 +101,8 @@ test("when the margin budget can't carry 2% risk, size shrinks (never leverage a
 test("sizing refuses bad stops, too-tight stops and dust", () => {
   assert.ok("skip" in sizePosition({ side: "long", entry: 100, stop: 101, equity: 100, freeBalance: 100, stepSize: 0.001, settings: S }));
   assert.ok("skip" in sizePosition({ side: "long", entry: 100, stop: 99.95, equity: 100, freeBalance: 100, stepSize: 0.001, settings: S }));
+  assert.ok("skip" in sizePosition({ side: "long", entry: 100, stop: 99.65, equity: 100, freeBalance: 100, stepSize: 0.001, settings: S }), "0.35% stops lose more to fees than they are worth (MIN_STOP_PCT is 0.4%)");
+  assert.ok(!("skip" in sizePosition({ side: "long", entry: 100, stop: 99.55, equity: 100, freeBalance: 100, stepSize: 0.001, settings: S })));
   assert.ok("skip" in sizePosition({ side: "long", entry: 100, stop: 98, equity: 100, freeBalance: 0.2, stepSize: 0.001, settings: S }));
   assert.ok("skip" in sizePosition({ side: "long", entry: 100000, stop: 98000, equity: 100, freeBalance: 100, stepSize: 0.01, settings: S }));
 });

@@ -173,6 +173,8 @@ export interface BotTradeReview {
   afterExitR: number | null;
   afterExitBars: number | null;
   flags: string[];
+  /** Keys of the mistakes in `flags` (reviews written before tags existed have none). */
+  tags?: string[];
 }
 
 export type BotLessonStatus = "proposed" | "active" | "retired" | "rejected";
@@ -193,6 +195,8 @@ export interface BotLesson {
   retired_reason: string | null;
   created_at: string;
   activated_at: string | null;
+  /** The owner paused it: it is not switched back on automatically. */
+  paused: boolean;
 }
 
 export type BotReportKind = "hourly" | "daily" | "weekly" | "monthly";
@@ -280,6 +284,13 @@ export interface BotReportData {
     examples: { tradeId: string; strategy: string; timeframe: string; symbol: string; side: string; r: number; title: string; why: string; fix: string; flags: string[] }[];
   };
   lessons: { active: BotLessonSummary[]; proposed: BotLessonSummary[]; new: BotLessonSummary[]; retired: BotLessonSummary[] };
+  /** Reports written before the learning upgrade don't have this. */
+  learning?: {
+    impact: { strategy: string; timeframe: string; lessons: number; since: string; before: { n: number; avgR: number | null }; after: { n: number; avgR: number | null } }[];
+    tags: { tag: string; label: string; withN: number; withAvgR: number | null; withoutN: number; withoutAvgR: number | null; costR: number }[];
+    replayed: { reason: string; n: number; avgR: number | null }[];
+    gate: { skippedN: number; skippedAvgR: number | null; tradedN: number; tradedAvgR: number | null };
+  };
 }
 
 export interface BotNarrative {

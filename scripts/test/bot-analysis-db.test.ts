@@ -119,7 +119,7 @@ test("analysis: reviews, learns a lesson from the losers, writes reports, and re
   await pg.query(`update public.bot_lessons set blocked = 7, blocked_r = 5 where id = $1`, [mined.id]);
   const barSec = START + 15 * DAY + 5 * H;
   await db.logFiltered([{
-    account_id: acc.id, lesson_ids: [mined.id], symbol: "BTCUSDT", side: "long", entry_price: minutes.BTCUSDT[(barSec + H - START) / 60].open,
+    account_id: acc.id, reason: "lesson", lesson_ids: [mined.id], symbol: "BTCUSDT", side: "long", entry_price: minutes.BTCUSDT[(barSec + H - START) / 60].open,
     stop_price: minutes.BTCUSDT[(barSec + H - START) / 60].open * 0.99, take_profit: minutes.BTCUSDT[(barSec + H - START) / 60].open * 1.02,
     signal_bar_time: new Date(barSec * 1000).toISOString(), features: { adx14: 10 },
   }]);

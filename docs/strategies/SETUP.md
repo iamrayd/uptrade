@@ -27,11 +27,30 @@ Open [`supabase/bot_cron.sql`](../../supabase/bot_cron.sql) and replace `<PROJEC
 
 ## 4. Start
 
-Open UpTrade → **Bots** → **Start bots**. Within a minute the 30 accounts appear, and the status pill turns green (**Running**).
+Open UpTrade → **Bots** → **Start bots**. Within a minute the accounts appear (one per strategy and timeframe, 48 with the news twins), and the status pill turns green (**Running**).
 
 ## 5. AI analysis and learning (optional, recommended)
 
 Deploy `bot-analyze` and re-run `bot_cron.sql`. This reviews every trade, ranks the setups, writes hourly to monthly reports and lets the bots learn from their losers. See [ANALYSIS.md](ANALYSIS.md).
+
+## 6. Crypto news (optional, for the "+ News" bots)
+
+Deploy `bot-news` and re-run `bot_cron.sql`. It reads public RSS headlines and the Fear & Greed index every 10 minutes; no key is needed. Without it, the "+ News" bots trade on the indicators alone. See [NEWS.md](NEWS.md).
+
+## Upgrading an existing install
+
+After pulling this version, do all of these, in this order:
+
+1. Re-run [`supabase/bot.sql`](../../supabase/bot.sql) in the SQL Editor (safe to re-run; it only adds columns and a table).
+2. Redeploy all three functions:
+   ```bash
+   npx supabase functions deploy bot-tick --no-verify-jwt
+   npx supabase functions deploy bot-analyze --no-verify-jwt
+   npx supabase functions deploy bot-news --no-verify-jwt
+   ```
+3. Re-run [`supabase/bot_cron.sql`](../../supabase/bot_cron.sql) with your project ref and secret (it adds the news job).
+
+Don't delete the old trades: they are what the bots learn from. The next `bot-tick` run creates the accounts for the new "+ News" strategies. Existing lessons keep working; any that were waiting only because the old limit was 3 per setup go live if they still hold on today's data.
 
 ## Checking it's healthy
 
@@ -52,9 +71,11 @@ Deploy `bot-analyze` and re-run `bot_cron.sql`. This reviews every trade, ranks 
   ```sql
   delete from bot_accounts; delete from bot_cursors; delete from bot_events;
   ```
-  The next run recreates the 30 accounts with $100 each.
+  The next run recreates the accounts with $100 each.
 
 ## Backtest
+
+The last results, before and after the entry gate, are in [docs/backtests](../backtests/) and explained in [EVIDENCE.md](EVIDENCE.md).
 
 On a computer that can reach Binance:
 
@@ -63,4 +84,4 @@ npm install
 npm run backtest              # the last 365 days; or: npm run backtest -- --days 180
 ```
 
-This writes `docs/backtests/latest.md` with return, win rate, profit factor, average R, max drawdown and monthly consistency for all 30 setups.
+This writes `docs/backtests/latest.md` with return, win rate, profit factor, average R, max drawdown and monthly consistency for all 30 setups (the news twins are skipped: there is no news history). Add `--gate 65 --discipline` to trade the way the live bots do now (confluence gate, cooldown after losses, smaller risk while down); `npm run backtest` alone trades every signal, as before. `node scripts/gate-sweep.ts` compares thresholds on an older and a newer half of the year.

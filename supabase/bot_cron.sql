@@ -12,7 +12,7 @@ create extension if not exists pg_net;
 select vault.create_secret('<BOT_CRON_SECRET>', 'bot_cron_secret')
  where not exists (select 1 from vault.secrets where name = 'bot_cron_secret');
 
-select cron.unschedule(jobid) from cron.job where jobname in ('uptrade-bot-tick', 'uptrade-bot-prune', 'uptrade-bot-analyze');
+select cron.unschedule(jobid) from cron.job where jobname in ('uptrade-bot-tick', 'uptrade-bot-prune', 'uptrade-bot-analyze', 'uptrade-bot-news');
 
 select cron.schedule(
   'uptrade-bot-tick',
@@ -44,6 +44,24 @@ select cron.schedule(
     ),
     body := '{}'::jsonb,
     timeout_milliseconds := 150000
+  );
+  $$
+);
+
+-- Every 10 minutes: read crypto headlines + the Fear & Greed index for the "+ News" bots (needs the
+-- bot-news function deployed, see docs/strategies/NEWS.md). Without it, those bots trade on indicators alone.
+select cron.schedule(
+  'uptrade-bot-news',
+  '*/10 * * * *',
+  $$
+  select net.http_post(
+    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/bot-news',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-bot-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'bot_cron_secret')
+    ),
+    body := '{}'::jsonb,
+    timeout_milliseconds := 60000
   );
   $$
 );

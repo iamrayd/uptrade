@@ -1,56 +1,33 @@
 // Backtests all 5 strategies × 6 timeframes on BTC/ETH/SOL with real Binance history.
+// The "+ News" twins are skipped: there is no news history, so they would only repeat their originals.
 //
-//   npm run backtest                 # last 365 days
+//   npm run backtest                 # last 365 days, every signal traded (the raw strategies)
 //   npm run backtest -- --days 180
+//   npm run backtest -- --gate 65 --discipline    # as the live bots trade: confluence gate + cooldown + risk cut
 //
 // Needs internet access to data-api.binance.vision. Candles are cached in
 // scripts/.cache so re-runs are fast. Writes docs/backtests/latest.md and .json.
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { STRATEGIES } from "../supabase/functions/_shared/bot/strategies.ts";
 import { backtest, type BtResult } from "../supabase/functions/_shared/bot/backtest.ts";
 import { binanceMarket } from "../supabase/functions/_shared/bot/io.ts";
-import { SYMBOLS, TF_SECONDS, TIMEFRAMES, type Candle, type Timeframe } from "../supabase/functions/_shared/bot/types.ts";
+import { SYMBOLS, TF_SECONDS, TIMEFRAMES, type Candle } from "../supabase/functions/_shared/bot/types.ts";
+import { align, history } from "./lib/history.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const CACHE = join(ROOT, "scripts", ".cache");
 const OUT = join(ROOT, "docs", "backtests");
 
 const argDays = process.argv.indexOf("--days");
 const DAYS = argDays > 0 ? Number(process.argv[argDays + 1]) : 365;
+const argGate = process.argv.indexOf("--gate");
+const GATE = argGate > 0 ? Number(process.argv[argGate + 1]) : undefined;
+const DISCIPLINE = process.argv.includes("--discipline");
 const SETTINGS = { riskPct: 0.02, maxLeverage: 20, slots: SYMBOLS.length };
 const START_BALANCE = 100;
 const WARMUP_BARS = 600;
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function history(symbol: string, tf: Timeframe, fromSec: number, toSec: number): Promise<Candle[]> {
-  mkdirSync(CACHE, { recursive: true });
-  const file = join(CACHE, `${symbol}_${tf}_${fromSec}_${toSec}.json`);
-  if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8")) as Candle[];
-  const out: Candle[] = [];
-  let start = fromSec * 1000;
-  while (start < toSec * 1000) {
-    const page = await binanceMarket.klines(symbol, tf, { startTime: start, limit: 1000 });
-    if (!page.length) break;
-    for (const c of page) if (c.time < toSec && (!out.length || c.time > out[out.length - 1].time)) out.push(c);
-    const next = page[page.length - 1].time * 1000 + TF_SECONDS[tf] * 1000;
-    if (next <= start) break;
-    start = next;
-    await sleep(120);
-  }
-  writeFileSync(file, JSON.stringify(out));
-  return out;
-}
-
-function align(bySym: Record<string, Candle[]>) {
-  // Keep only timestamps every symbol has, so bars line up.
-  const sets = Object.values(bySym).map((l) => new Set(l.map((c) => c.time)));
-  const common = (t: number) => sets.every((s) => s.has(t));
-  return Object.fromEntries(Object.entries(bySym).map(([s, l]) => [s, l.filter((c) => common(c.time))]));
-}
 
 const pct = (n: number | null) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`);
 const num = (n: number | null, d = 2) => (n == null ? "—" : n.toFixed(d));
@@ -73,9 +50,9 @@ async function main() {
       console.log(bySym[s].length);
     }
     const data = align(bySym);
-    for (const strat of STRATEGIES) {
+    for (const strat of STRATEGIES.filter((s) => !s.newsAware)) {
       const t0 = Date.now();
-      const r = backtest({ strategy: strat, timeframe: tf, candlesBySymbol: data, filters, settings: SETTINGS, startBalance: START_BALANCE, from: start });
+      const r = backtest({ strategy: strat, timeframe: tf, candlesBySymbol: data, filters, settings: SETTINGS, startBalance: START_BALANCE, from: start, minConfluence: GATE, discipline: DISCIPLINE });
       results.push(r);
       console.log(`  ${strat.key.padEnd(11)} ${tf.padEnd(4)} ${pct(r.returnPct).padStart(9)}  ${String(r.trades).padStart(4)} trades  DD ${r.maxDrawdownPct.toFixed(1)}%  (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     }
@@ -87,6 +64,7 @@ async function main() {
     `# Backtest: ${DAYS} days to ${new Date(end * 1000).toISOString().slice(0, 10)}`,
     "",
     `$${START_BALANCE} per setup, ${SETTINGS.riskPct * 100}% risk per trade, max ${SETTINGS.maxLeverage}x, ${SYMBOLS.join(" / ")}. MEXC-style fees (taker 0.02%, maker 0%).`,
+    GATE != null || DISCIPLINE ? `Entry rules: ${GATE != null ? `confluence gate ≥ ${GATE}/100` : "no confluence gate"}${DISCIPLINE ? ", cooldown after losses and smaller risk while the account is down" : ""}.` : "Entry rules: every signal is traded (no confluence gate, no discipline).",
     "Stops and targets are checked on each timeframe's own bars (stop first when a bar touches both). Entries fill at the next bar's open.",
     "",
     "| # | Strategy | TF | Return | Final | Trades | Win % | PF | Avg R | Max DD | +Months | Worst month | Liq |",

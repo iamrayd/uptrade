@@ -169,6 +169,7 @@ export function pgAnalysisDb(pg: PGlite): AnalysisDb {
     resolveSignals: async (r) => void (r.length && (await call("select public.bot_resolve_signals($1::jsonb) r", [j(r)]))),
     saveLessons: async (r) => void (r.length && (await call("select public.bot_save_lessons($1::jsonb) r", [j(r)]))),
     saveReport: async (r) => void (await call("select public.bot_save_report($1::jsonb) r", [j(r)])),
+    tuneAccounts: async (r) => void (r.length && (await call("select public.bot_tune_accounts($1::jsonb) r", [j(r)]))),
   };
 }
 

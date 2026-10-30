@@ -1,4 +1,6 @@
 import type { Candle } from "./types.ts";
+import type { RecentTrade } from "./discipline.ts";
+import type { NewsState } from "./news.ts";
 
 export interface SymbolFilters {
   step: number;
@@ -67,6 +69,19 @@ export interface AccountRow {
   enabled: boolean;
   risk_pct: number;
   max_leverage: number;
+  start_balance: number;
+  /** Shadow-only: signals are logged and replayed but never traded (tuning.ts decides). */
+  probation: boolean;
+  /** Per-setup confluence threshold; null: the global default. */
+  min_confluence: number | null;
+  /** Move the stop to fee cover once the trade reaches +1R. */
+  breakeven: boolean;
+  /** Scale risk by entry confluence and the setup's verdict. */
+  conviction: boolean;
+  /** The setup's latest analyzer verdict (live_ready | promising | unproven | needs_data | avoid), null before the first run. */
+  verdict: string | null;
+  /** Latest closed trades, oldest first. */
+  recent: RecentTrade[];
 }
 
 export interface TradeRow {
@@ -82,6 +97,7 @@ export interface TradeRow {
   leverage: number;
   margin: number;
   liq_price: number;
+  initial_stop: number;
   stop_price: number;
   take_profit: number | null;
   trailed: boolean;
@@ -109,10 +125,16 @@ export interface BotState {
   open_trades: TradeRow[];
   cursors: Record<string, string>;
   lessons?: LessonRow[];
+  /** Latest crypto-news read (null before bot-news has run). */
+  news?: (NewsState & { updated_at: string }) | null;
 }
+
+/** Why a signal was not traded. */
+export type SkipReason = "lesson" | "confluence" | "cooldown" | "news" | "busted" | "probation" | "min_stop";
 
 export interface FilteredSignalInput {
   account_id: string;
+  reason: SkipReason;
   lesson_ids: string[];
   symbol: string;
   side: "long" | "short";
@@ -179,7 +201,7 @@ export interface Db {
   setCursor(key: string, barTimeIso: string): Promise<void>;
   openTrade(p: OpenTradeInput): Promise<{ trade: TradeRow; balance: number }>;
   closeTrade(a: { id: string; price: number; reason: string; feeRate: number; at: string; note: string }): Promise<{
-    trade: TradeRow & { net_pnl: number };
+    trade: TradeRow & { net_pnl: number; r_multiple: number | null; closed_at: string };
     balance: number;
     status: "active" | "busted";
   } | null>;
@@ -192,6 +214,9 @@ export interface Db {
 
 export interface LessonRecord extends LessonRow {
   status: "proposed" | "active" | "retired" | "rejected";
+  /** The owner paused it: it is not switched back on automatically. */
+  paused?: boolean;
+  activated_at?: string | null;
   source: "mined" | "ai";
   explanation: string;
   blocked: number;
@@ -203,6 +228,8 @@ export interface FilteredSignalRow {
   id: string;
   user_id: string;
   account_id: string;
+  reason: SkipReason;
+  features: Record<string, number | string>;
   lesson_ids: string[];
   strategy: string;
   timeframe: string;
@@ -215,13 +242,41 @@ export interface FilteredSignalRow {
   created_at: string;
 }
 
+export interface TunableAccount {
+  id: string;
+  user_id: string;
+  strategy: string;
+  timeframe: string;
+  start_balance: number;
+  status: "active" | "busted";
+  probation: boolean;
+  probation_changed_at: string | null;
+  min_confluence: number | null;
+  min_confluence_changed_at: string | null;
+  breakeven: boolean;
+  breakeven_changed_at: string | null;
+  conviction: boolean;
+  verdict: string | null;
+}
+
+export interface AccountTune {
+  id: string;
+  probation?: boolean;
+  min_confluence?: number | null;
+  breakeven?: boolean;
+  conviction?: boolean;
+  verdict?: string;
+}
+
 export interface AnalysisState {
   settings: { user_id: string; auto_learn: boolean }[];
-  accounts: { id: string; user_id: string; strategy: string; timeframe: string; start_balance: number; status: "active" | "busted" }[];
+  accounts: TunableAccount[];
   /** Closed trades, oldest first, with numbers possibly as strings (Postgres numerics). */
   trades: (Record<string, unknown> & { id: string; reviewed: boolean; review_category: string | null; review: unknown })[];
   lessons: LessonRecord[];
   pending_signals: FilteredSignalRow[];
+  /** Replayed signals (newest 4000): learning data and each lesson's recent record. */
+  resolved_signals: (Omit<FilteredSignalRow, "entry_price" | "stop_price" | "take_profit" | "created_at"> & { outcome_r: number; outcome_r_be?: number | null; resolved_at: string })[];
   last_reports: { user_id: string; kind: string; period_start: string }[];
 }
 
@@ -261,9 +316,10 @@ export interface ReportInput {
 export interface AnalysisDb {
   state(): Promise<AnalysisState>;
   saveReviews(rows: { id: string; review: unknown }[]): Promise<void>;
-  resolveSignals(rows: { id: string; outcome_r: number; outcome_note: string }[]): Promise<void>;
+  resolveSignals(rows: { id: string; outcome_r: number | null; outcome_r_be?: number | null; outcome_note: string }[]): Promise<void>;
   saveLessons(rows: (NewLesson | LessonChange)[]): Promise<void>;
   saveReport(r: ReportInput): Promise<void>;
+  tuneAccounts(rows: AccountTune[]): Promise<void>;
 }
 
 /** Calls a PostgREST RPC with the service-role key. */
@@ -294,6 +350,12 @@ function rpcClient(url: string, serviceKey: string) {
   return rpc;
 }
 
+/** PostgREST client for the news RPC in supabase/bot.sql. */
+export function restNewsDb(url: string, serviceKey: string) {
+  const rpc = rpcClient(url, serviceKey);
+  return { saveNews: async (data: NewsState) => void (await rpc("bot_save_news", { p: { data } })) };
+}
+
 /** PostgREST client for the engine RPCs in supabase/bot.sql. */
 export function restDb(url: string, serviceKey: string): Db {
   const rpc = rpcClient(url, serviceKey);
@@ -321,5 +383,6 @@ export function restAnalysisDb(url: string, serviceKey: string): AnalysisDb {
     resolveSignals: async (r) => void (r.length && (await rpc("bot_resolve_signals", { p: r }))),
     saveLessons: async (r) => void (r.length && (await rpc("bot_save_lessons", { p: r }))),
     saveReport: async (r) => void (await rpc("bot_save_report", { p: r })),
+    tuneAccounts: async (r) => void (r.length && (await rpc("bot_tune_accounts", { p: r }))),
   };
 }

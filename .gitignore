@@ -43,3 +43,6 @@ next-env.d.ts
 
 # backtest candle cache
 /scripts/.cache
+
+# supabase cli state
+supabase/.temp/

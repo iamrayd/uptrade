@@ -1,4 +1,7 @@
-import type { Candle, ExitReason, Side, StrategyDef } from "./types.ts";
+import type { Candle, ExitReason, Side, StrategyDef, Timeframe } from "./types.ts";
+import { TF_SECONDS } from "./types.ts";
+import { confluence, passesGate } from "./confluence.ts";
+import { cooldownUntil, riskMultiplier, type RecentTrade } from "./discipline.ts";
 import { checkExit, closeMath, roundStop, sizePosition, TAKER_FEE, tighterStop, toTick, type RiskSettings } from "./risk.ts";
 
 // Replays history through the SAME strategy and risk code the live bot uses.
@@ -21,6 +24,8 @@ export interface BtTrade {
   net: number;
   r: number;
   reason: ExitReason;
+  /** The confluence reading at the signal, when the backtest was asked to track it. */
+  cf?: { score: number; htf: number | null; checks: Record<string, boolean> };
 }
 
 export interface BtResult {
@@ -57,6 +62,7 @@ interface Open {
   riskUsd: number;
   entryTime: number;
   signalBarTime: number;
+  cf?: BtTrade["cf"];
 }
 
 /**
@@ -71,6 +77,12 @@ export function backtest(a: {
   settings: RiskSettings;
   startBalance: number;
   from: number;
+  /** Skip signals whose confluence score (0–100) is below this. Omit to trade every signal, as before. */
+  minConfluence?: number;
+  /** Record the confluence reading of every trade (for analysis), even when no gate is applied. */
+  trackConfluence?: boolean;
+  /** Apply the live bot's discipline: cool down after losses and trade smaller while the account is down. */
+  discipline?: boolean;
 }): BtResult {
   const { strategy, candlesBySymbol, settings } = a;
   const symbols = Object.keys(candlesBySymbol);
@@ -78,10 +90,12 @@ export function backtest(a: {
   let busted = false;
   const open = new Map<string, Open>();
   const pendingExit = new Map<string, string>();
-  const pendingEntry = new Map<string, { side: Side; stop: number; takeProfit: number | null; signalBarTime: number }>();
+  const pendingEntry = new Map<string, { side: Side; stop: number; takeProfit: number | null; signalBarTime: number; cf?: BtTrade["cf"] }>();
   const trades: BtTrade[] = [];
   const curve: { time: number; equity: number }[] = [];
   let liquidations = 0;
+  const recent: RecentTrade[] = [];
+  const tfMs = (TF_SECONDS[a.timeframe as Timeframe] ?? 3600) * 1000;
 
   // Index bars by time per symbol.
   const times = [...new Set(symbols.flatMap((s) => candlesBySymbol[s].map((c) => c.time)))].sort((x, y) => x - y);
@@ -98,9 +112,10 @@ export function backtest(a: {
     trades.push({
       symbol: sym, side: o.side, entryTime: o.entryTime, exitTime: time, entry: o.entry,
       exit: reason === "liquidation" ? o.liq : price, qty: o.qty, leverage: Math.round((o.qty * o.entry) / o.margin),
-      riskUsd: o.riskUsd, net, r: o.riskUsd > 0 ? net / o.riskUsd : 0, reason,
+      riskUsd: o.riskUsd, net, r: o.riskUsd > 0 ? net / o.riskUsd : 0, reason, cf: o.cf,
     });
     if (reason === "liquidation") liquidations++;
+    recent.push({ symbol: sym, r: o.riskUsd > 0 ? net / o.riskUsd : 0, closed_at: new Date(time * 1000).toISOString() });
     open.delete(sym);
     if (equityNow() < 10) busted = true;
   }
@@ -124,12 +139,13 @@ export function backtest(a: {
         const okTp = pn.takeProfit == null || (pn.side === "long" ? pn.takeProfit > c.open : pn.takeProfit < c.open);
         if (okSide && okTp) {
           const eq = equityNow();
-          const sz = sizePosition({ side: pn.side, entry: c.open, stop: pn.stop, equity: eq, freeBalance: balance, stepSize: a.filters[sym]?.step ?? 0.00001, settings });
+          const mult = a.discipline ? riskMultiplier({ equity: eq, startBalance: a.startBalance, recent }).mult : 1;
+          const sz = sizePosition({ side: pn.side, entry: c.open, stop: pn.stop, equity: eq, freeBalance: balance, stepSize: a.filters[sym]?.step ?? 0.00001, settings: { ...settings, riskPct: settings.riskPct * mult } });
           if (!("skip" in sz)) {
             balance -= sz.margin + sz.entryFee;
             open.set(sym, {
               side: pn.side, entry: c.open, qty: sz.qty, margin: sz.margin, entryFee: sz.entryFee, liq: sz.liqPrice,
-              stop: pn.stop, takeProfit: pn.takeProfit, trailed: false, riskUsd: sz.riskUsd, entryTime: c.time, signalBarTime: pn.signalBarTime,
+              stop: pn.stop, takeProfit: pn.takeProfit, trailed: false, riskUsd: sz.riskUsd, entryTime: c.time, signalBarTime: pn.signalBarTime, cf: pn.cf,
             });
           }
         }
@@ -168,12 +184,18 @@ export function backtest(a: {
       }
       if (flat && !busted) {
         const sig = strategy.entry(hist);
-        if (sig && !("skip" in sig))
+        const cooling = a.discipline && cooldownUntil(recent, sym, tfMs) != null && cooldownUntil(recent, sym, tfMs)!.until > t * 1000;
+        const live = sig && !("skip" in sig) ? sig : null;
+        const stop = live ? roundStop(live.side, live.stop, tick(sym)) : 0;
+        const cf = live && (a.minConfluence != null || a.trackConfluence) ? confluence({ strategy: strategy.key, timeframe: a.timeframe as Timeframe, side: live.side, candles: hist, entry: c.close, stop }) : null;
+        const agrees = cf == null || a.minConfluence == null || passesGate(cf, a.minConfluence);
+        if (live && agrees && !cooling)
           pendingEntry.set(sym, {
-            side: sig.side,
-            stop: roundStop(sig.side, sig.stop, tick(sym)),
-            takeProfit: sig.takeProfit == null ? null : toTick(sig.takeProfit, tick(sym), "nearest"),
+            side: live.side,
+            stop,
+            takeProfit: live.takeProfit == null ? null : toTick(live.takeProfit, tick(sym), "nearest"),
             signalBarTime: c.time,
+            cf: cf ? { score: cf.score, htf: cf.htf, checks: Object.fromEntries(cf.checks.map((k) => [k.key, k.pass])) } : undefined,
           });
       }
     }

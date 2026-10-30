@@ -64,6 +64,10 @@ export interface StrategyDef {
   params: Record<string, number>;
   /** Closed bars needed before signals are trusted (indicator warm-up). */
   warmup: number;
+  /** The strategy whose trigger, stops and exits this one reuses (news variants). The confluence gate reads the base key. */
+  baseKey?: string;
+  /** True when entries also pass the crypto-news gate (news.ts). */
+  newsAware?: boolean;
   /** Looks at the last closed bar (candles are ascending, all closed). */
   entry(candles: Candle[]): EntryResult;
   manage(candles: Candle[], trade: OpenTradeView): ManageResult;
