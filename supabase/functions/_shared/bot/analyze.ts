@@ -280,10 +280,14 @@ export async function runAnalysis(a: {
         if (st.verdict !== acc.verdict) tune.verdict = st.verdict;
         const accShadows = resolvedSignals.filter((s) => s.account_id === acc.id && s.outcome_r != null);
         const accTrades = mine.filter((t) => t.account_id === acc.id);
+        // Promotion is judged on the probation replays only: those are the entries that passed
+        // every other gate and would really have been traded. Signals the confluence gate, a
+        // lesson, the news gate or the cooldown rejected are bad by construction and would hold
+        // the setup on probation forever.
         const p = probationTune({
           probation: acc.probation,
           changedAt: acc.probation_changed_at,
-          replayRs: accShadows.map((s) => +s.outcome_r),
+          replayRs: accShadows.filter((s) => s.reason === "probation").map((s) => +s.outcome_r),
           verdict: st.verdict,
           now: now(),
         });

@@ -43,16 +43,36 @@ async function insertTrade(pg: PGlite, accId: string, strategy: string, i: numbe
 }
 
 /** A signal that was not traded, already replayed. */
-async function insertShadow(pg: PGlite, accId: string, strategy: string, i: number, reason: string, outcomeR: number | null, features: Record<string, unknown>, lessonIds: string[] = []) {
+async function insertShadow(pg: PGlite, accId: string, strategy: string, i: number, reason: string, outcomeR: number | null, features: Record<string, unknown>, lessonIds: string[] = [], tf = "1h") {
   const bar = START + DAY + i * 12 * H;
   const entry = PRICE.BTCUSDT;
   await pg.query(
     `insert into public.bot_filtered_signals (user_id, account_id, lesson_ids, strategy, timeframe, symbol, side, entry_price, stop_price, take_profit,
        signal_bar_time, features, reason, outcome_r, outcome_note, resolved_at)
-     values ($1, $2, $3::uuid[], $4, '1h', 'BTCUSDT', 'long', $5, $6, $7, to_timestamp($8), $9::jsonb, $10, $11, 'replayed', ${outcomeR == null ? "null" : "now()"})`,
-    [USER, accId, `{${lessonIds.join(",")}}`, strategy, entry, entry * 0.99, entry * 1.02, bar, JSON.stringify(features), reason, outcomeR],
+     values ($1, $2, $3::uuid[], $4, $12, 'BTCUSDT', 'long', $5, $6, $7, to_timestamp($8), $9::jsonb, $10, $11, 'replayed', ${outcomeR == null ? "null" : "now()"})`,
+    [USER, accId, `{${lessonIds.join(",")}}`, strategy, entry, entry * 0.99, entry * 1.02, bar, JSON.stringify(features), reason, outcomeR, tf],
   );
 }
+
+test("probation is cleared on the probation replays alone: signals the other gates rejected do not count against the setup", { timeout: 300_000 }, async () => {
+  const pg = await setup();
+  const don15 = await account(pg, "donchian", "15m");
+  const flags = async () => (await pg.query<{ probation: boolean }>(`select probation from public.bot_accounts where id = $1`, [don15])).rows[0].probation;
+  assert.equal(await flags(), true, "15m setups start on probation");
+  const nowMs = (START + 21 * DAY + 30 * 60) * 1000;
+  // The flip cooldown has passed (measured against the analyzer's clock, not the wall clock).
+  await pg.query(`update public.bot_accounts set probation_changed_at = to_timestamp($2) where id = $1`, [don15, nowMs / 1000 - 10 * DAY]);
+  // 30 entries that passed every gate and were only held back by probation: 70% winners at +2R (PF 4.7).
+  for (let i = 0; i < 30; i++) await insertShadow(pg, don15, "donchian", i, "probation", i % 10 < 7 ? 2 : -1, { adx14: 30, confluence: 80 }, [], "15m");
+  // 60 signals the confluence gate rejected, all losers. They are learning data, not a verdict on the setup.
+  for (let i = 0; i < 60; i++) await insertShadow(pg, don15, "donchian", 100 + i, "confluence", -1, { adx14: 30, confluence: 50 }, [], "15m");
+
+  const minutes = { BTCUSDT: syntheticMinutes(1, START, 22 * 1440, 60000), ETHUSDT: syntheticMinutes(2, START, 22 * 1440, 3000) };
+  const market = fakeMarket(minutes, () => nowMs, { BTCUSDT: 0.00001, ETHUSDT: 0.0001 });
+  const s = await runAnalysis({ market, db: pgAnalysisDb(pg), now: () => nowMs, narrator: null });
+  assert.deepEqual(s.errors, []);
+  assert.equal(await flags(), false, "30 profitable probation replays clear probation even when the gate-rejected replays lost");
+});
 
 test("analysis keeps learning: waiting lessons go live, lessons that stopped working retire, skipped signals are replayed in batches and teach", { timeout: 300_000 }, async () => {
   const pg = await setup();
