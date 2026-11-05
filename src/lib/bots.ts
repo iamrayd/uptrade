@@ -80,4 +80,56 @@ export function priceToR(t: Pick<BotTrade, "side" | "entry_price" | "initial_sto
   return (t.side === "long" ? price - t.entry_price : t.entry_price - price) / risk;
 }
 
+// ── Aggressive accounts (strategy "aggro") ──
+
+export const AGGRO_KEY = "aggro";
+/** Phantom samples an average is shrunk with; the same number as AGGRO.prior in playbook.ts. */
+const PLAYBOOK_PRIOR = 20;
+
+const FACET_LABEL: Record<string, (v: string) => string> = {
+  side: (v) => `${v}s`,
+  sym: (v) => v.replace(/USDT$/, ""),
+  htf: (v) => (v === "na" ? "no higher-timeframe read" : v === "mixed" ? "a mixed higher-timeframe trend" : `${v} the higher-timeframe trend`),
+  cf: (v) => `${v === "lo" ? "low" : v === "hi" ? "high" : "middling"} confluence`,
+  vol: (v) => (v === "na" ? "unknown volatility" : `${v} volatility`),
+  adx: (v) => (v === "trend" ? "a trending market" : v === "range" ? "a ranging market" : v === "mid" ? "between range and trend" : "unknown trend strength"),
+  ema: (v) => (v === "with" ? "the right side of EMA 200" : v === "against" ? "the wrong side of EMA 200" : "no EMA 200 yet"),
+  ses: (v) => `the ${v} session`,
+};
+
+/** Plain words for a playbook cell key such as "s=donchian|htf=with" (cellLabel in playbook.ts). */
+export function playbookCellLabel(key: string, strategyName: (k: string) => string = (k) => k) {
+  return key
+    .split("|")
+    .map((part) => {
+      const [k, v] = part.split("=");
+      return k === "s" ? strategyName(v) : (FACET_LABEL[k]?.(v) ?? part);
+    })
+    .join(" · ");
+}
+
+export interface PlaybookRow {
+  key: string;
+  n: number;
+  avgR: number;
+}
+
+/** What the playbook has learned: each rule set's average, and the rule set × context cells with the best and worst record. */
+export function playbookSummary(pb: { cells: Record<string, [number, number]> } | null | undefined, minN = 15) {
+  const rows: PlaybookRow[] = Object.entries(pb?.cells ?? {}).map(([key, [n, s]]) => ({ key, n: Math.round(n), avgR: s / (n + PLAYBOOK_PRIOR) }));
+  const ruleSets = rows.filter((r) => /^s=[^|]+$/.test(r.key)).sort((x, y) => y.avgR - x.avgR);
+  const contexts = rows.filter((r) => r.key.includes("|") && r.n >= minN).sort((x, y) => y.avgR - x.avgR);
+  return { ruleSets, best: contexts.slice(0, 6), worst: contexts.slice(-6).reverse() };
+}
+
+/** The slope the playbook corrects its estimates with (calibrate in playbook.ts); null before any signal was checked. */
+export function playbookSlope(pb: { cal?: { n: number; sx: number; sy: number; sxx: number; sxy: number } } | null | undefined) {
+  const c = pb?.cal;
+  if (!c || !(c.n > 0)) return null;
+  const mx = c.sx / c.n;
+  const my = c.sy / c.n;
+  const slope = (c.sxy - c.n * mx * my) / (Math.max(c.sxx - c.n * mx * mx, 0) + 1);
+  return { slope: Math.max(-3, Math.min(3, slope)), checked: Math.round(c.n), avgR: my };
+}
+
 export const fmtR = (r: number | null | undefined) => (r == null || !Number.isFinite(r) ? "—" : `${r > 0 ? "+" : r < 0 ? "−" : ""}${Math.abs(r).toFixed(2)}R`);

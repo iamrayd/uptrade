@@ -13,7 +13,7 @@ for (const tf of TFS) { const b: any = {}; for (const s of SYMBOLS) b[s] = await
 const f = (n: number, d = 2) => n.toFixed(d);
 console.log("setup            | disc ON ret / avgR / n   | disc OFF ret / avgR / n  | OFF gate0 ret / avgR / n");
 const tot = { on: 0, off: 0, raw: 0 };
-for (const tf of TFS) for (const st of STRATEGIES.filter((s: any) => !s.newsAware)) {
+for (const tf of TFS) for (const st of STRATEGIES.filter((s: any) => !s.newsAware && !s.pool)) {
   const go = (disc: boolean, gate?: number) => {
     const r = backtest({ strategy: st, timeframe: tf, candlesBySymbol: data[tf], filters, settings: { riskPct: 0.02, maxLeverage: 20, slots: 3 }, startBalance: 100, from: START, minConfluence: gate, discipline: disc });
     let net = 0, sumR = 0;

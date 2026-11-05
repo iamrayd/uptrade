@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runTick } from "../../supabase/functions/_shared/bot/tick.ts";
 import { closeMath, TAKER_FEE } from "../../supabase/functions/_shared/bot/risk.ts";
+import { strategyMeta } from "../../supabase/functions/_shared/bot/io.ts";
 import { STRATEGIES } from "../../supabase/functions/_shared/bot/strategies.ts";
 import { TIMEFRAMES } from "../../supabase/functions/_shared/bot/types.ts";
 import { isRetired } from "../../supabase/functions/_shared/bot/tuning.ts";
@@ -26,7 +27,7 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
   const db = pgDb(pg);
 
   // An active lesson that blocks every Supertrend 15m entry (any stop distance ≥ 0).
-  await db.sync(STRATEGIES.map(({ key, name, version, summary, rules, params }) => ({ key, name, version, summary, rules, params })), TIMEFRAMES);
+  await db.sync(strategyMeta(STRATEGIES), TIMEFRAMES);
   await pg.query(
     `insert into public.bot_lessons (user_id, strategy, timeframe, feature, op, value, status, title, explanation)
      values ($1, 'supertrend', '15m', 'stopPct', 'gte', '0', 'active', 'block all', 'test')`,
@@ -51,7 +52,8 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
   const accounts = (await pg.query<{ id: string; user_id: string; strategy: string; timeframe: string; balance: string; start_balance: string; status: string }>(
     `select * from public.bot_accounts`,
   )).rows;
-  assert.equal(accounts.length, STRATEGIES.length * TIMEFRAMES.length);
+  // One account per strategy and timeframe; a strategy with its own timeframe list (the aggressive one) only gets those.
+  assert.equal(accounts.length, STRATEGIES.reduce((n, s) => n + (s.timeframes?.length ?? TIMEFRAMES.length), 0));
   assert.ok(accounts.every((a) => a.user_id === USER));
 
   const trades = (await pg.query<Record<string, unknown>>(`select * from public.bot_trades order by opened_at`)).rows;
@@ -84,7 +86,8 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
     const liq = +(t.liq_price as string);
     if (liq > 0) assert.ok(side === "long" ? liq < stop0 : liq > stop0, "liquidation must be beyond the stop");
     assert.ok(+(t.leverage as number) <= 20);
-    assert.ok(+(t.risk_pct as string) <= 0.02 + 1e-9);
+    // 2% for the ordinary bots; an aggressive account's playbook may risk up to 10%.
+    assert.ok(+(t.risk_pct as string) <= (t.strategy === "aggro" ? 0.1 : 0.02) + 1e-9, `${t.strategy}: risk ${t.risk_pct}`);
     // Entries only after the signal bar closed.
     assert.ok(new Date(t.opened_at as string).getTime() > new Date(t.signal_bar_time as string).getTime());
     assert.ok((t.entry_reason as string).length > 30);
@@ -131,11 +134,12 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
   // Gates run before lessons, so a lesson is never credited with a signal the gate had already skipped.
   assert.ok(blocked.every((b) => typeof b.features.confluence === "number" && (b.features.confluence as number) >= 65));
   // Every trade that was taken passed the gate and carries its confluence reading.
-  assert.ok(trades.every((t) => typeof (t.entry_indicators as Record<string, number>).cfScore === "number" && (t.entry_indicators as Record<string, number>).cfScore >= 65));
+  assert.ok(trades.filter((t) => t.strategy !== "aggro").every((t) => typeof (t.entry_indicators as Record<string, number>).cfScore === "number" && (t.entry_indicators as Record<string, number>).cfScore >= 65));
   // The lesson is scoped to 15m: Supertrend signals on other timeframes are never attributed to it.
   assert.ok(skipped.some((b) => b.strategy === "supertrend" && b.timeframe !== "15m" && b.reason !== "lesson"), "other timeframes are unaffected");
   // Each check's own result and the threshold used are stored with the trade (weight-0 checks become learnable).
-  assert.ok(trades.every((t) => {
+  // (The aggressive accounts are not behind the confluence gate or on probation: their playbook decides. See bot-aggro-db.test.ts.)
+  assert.ok(trades.filter((t) => t.strategy !== "aggro").every((t) => {
     const ind = t.entry_indicators as Record<string, number>;
     return ind.cfMin === 65 && Object.keys(ind).some((k) => k.startsWith("cf_")) && typeof ind.convMult === "number";
   }));
@@ -144,7 +148,7 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
   // The retired higher-timeframe setups are held shadow-only by the engine too, before any analysis run has set their flag.
   const shortTf = (tf: unknown) => ["5m", "15m", "30m"].includes(tf as string);
   const retired = (x: { strategy?: unknown; timeframe?: unknown }) => shortTf(x.timeframe) || isRetired(x.strategy as string, x.timeframe as string);
-  assert.equal(trades.filter((t) => shortTf(t.timeframe)).length, 0, "a probation setup must not trade");
+  assert.equal(trades.filter((t) => shortTf(t.timeframe) && t.strategy !== "aggro").length, 0, "a probation setup must not trade");
   assert.equal(trades.filter(retired).length, 0, "a retired setup must not trade");
   const probation = skipped.filter((b) => b.reason === "probation");
   assert.ok(probation.length > 0, "probation setups should have logged shadow signals");
@@ -189,7 +193,7 @@ test("bot engine: lock, permissions and row-level security", async () => {
   assert.equal(await db.lock(60), true);
   await db.unlock(null, {});
 
-  await db.sync(STRATEGIES.map(({ key, name, version, summary, rules, params }) => ({ key, name, version, summary, rules, params })), TIMEFRAMES);
+  await db.sync(strategyMeta(STRATEGIES), TIMEFRAMES);
   const acc = (await pg.query<{ id: string }>(`select id from public.bot_accounts limit 1`)).rows[0];
 
   // Engine RPCs are service-role only.

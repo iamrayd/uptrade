@@ -68,6 +68,13 @@ export interface StrategyDef {
   baseKey?: string;
   /** True when entries also pass the crypto-news gate (news.ts). */
   newsAware?: boolean;
+  /** The only timeframes this strategy gets an account on. Omitted: every timeframe. */
+  timeframes?: readonly Timeframe[];
+  /**
+   * A meta strategy: it owns no rules. It takes the signals of these strategies and lets a learned
+   * playbook choose among them (aggro.ts). Its own entry() never signals.
+   */
+  pool?: readonly string[];
   /** Looks at the last closed bar (candles are ascending, all closed). */
   entry(candles: Candle[]): EntryResult;
   manage(candles: Candle[], trade: OpenTradeView): ManageResult;

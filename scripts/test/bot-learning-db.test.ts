@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { PGlite } from "@electric-sql/pglite";
 import { runAnalysis } from "../../supabase/functions/_shared/bot/analyze.ts";
 import { runTick } from "../../supabase/functions/_shared/bot/tick.ts";
+import { strategyMeta } from "../../supabase/functions/_shared/bot/io.ts";
 import { STRATEGIES } from "../../supabase/functions/_shared/bot/strategies.ts";
 import { TF_SECONDS, TIMEFRAMES } from "../../supabase/functions/_shared/bot/types.ts";
 import { disciplineFor } from "../../supabase/functions/_shared/bot/discipline.ts";
@@ -12,7 +13,7 @@ const DAY = 86400;
 const H = 3600;
 const START = 1_760_000_000 - (1_760_000_000 % DAY); // UTC midnight
 const PRICE: Record<string, number> = { BTCUSDT: 60000, ETHUSDT: 3000 };
-const metaOf = STRATEGIES.map(({ key, name, version, summary, rules, params }) => ({ key, name, version, summary, rules, params }));
+const metaOf = strategyMeta(STRATEGIES);
 
 async function setup() {
   const pg = await freshDb();

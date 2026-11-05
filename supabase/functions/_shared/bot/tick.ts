@@ -7,7 +7,12 @@ import { CONFLUENCE, confluence, passesGate } from "./confluence.ts";
 import { convictionMult, cooldownUntil, riskMultiplier } from "./discipline.ts";
 import { isRetired } from "./tuning.ts";
 import { newsFor, newsGate, newsReadings } from "./news.ts";
-import type { AccountRow, Db, EventRow, FilteredSignalInput, LessonRow, Market, OpenTradeInput, PendingEntryRow, SkipReason, SymbolFilters, TradeRow, TradeUpdate } from "./io.ts";
+import { strategyMeta } from "./io.ts";
+import type { AccountRow, AggroTradeRow, Db, EventRow, FilteredSignalInput, LessonRow, Market, OpenTradeInput, PendingEntryRow, SkipReason, SymbolFilters, TradeRow, TradeUpdate } from "./io.ts";
+import { aggroCandidates, facetsOf, isAggro, learnedR, rate, type Rated } from "./aggro.ts";
+import { AGGRO_SEED } from "./aggro-seed.ts";
+import { autopsy, dayGuard, explain, learn, newPlaybook, readPlaybook, rollDay, type LifeTrade, type Outcome, type Playbook } from "./playbook.ts";
+import type { StrategyDef } from "./types.ts";
 
 // One bot run. Called every minute by pg_cron → bot-tick edge function.
 //
@@ -17,6 +22,10 @@ import type { AccountRow, Db, EventRow, FilteredSignalInput, LessonRow, Market, 
 //     it expires, it is cancelled and kept as an "unfilled" shadow signal.
 //  1. Stops & targets: replay the closed 1-minute candles since each open
 //     trade was last checked, and fill stops, targets and liquidations in time order.
+//  1b. Aggressive accounts (strategy "aggro": playbook.ts, aggro.ts): the playbook learns the
+//     outcomes it has not seen yet (closed trades, replayed signals); a life that ended gets its
+//     post-mortem; a redeploy the owner asked for is carried out. In step 2 these accounts take
+//     their own branch: the playbook rates every rule set's signal and sizes the best one.
 //  2. Bar closes: for every timeframe whose bar just closed, each strategy
 //     account manages its open trade (signal exits, trailing stops) and then
 //     looks for a new entry. A signal becomes a trade only after passing, in order:
@@ -101,19 +110,25 @@ export async function runTick({
   };
 
   try {
-    await db.sync(
-      STRATEGIES.map(({ key, name, version, summary, rules, params }) => ({ key, name, version, summary, rules, params })),
-      TIMEFRAMES,
-    );
+    await db.sync(strategyMeta(STRATEGIES), TIMEFRAMES);
     const state = await db.getState();
-    const accounts: AccountRow[] = state.accounts.map((a) => ({
-      ...a,
-      balance: +a.balance,
-      risk_pct: +a.risk_pct,
-      max_leverage: +a.max_leverage,
-      start_balance: +a.start_balance,
-      recent: (a.recent ?? []).map((t) => ({ ...t, r: t.r == null ? null : +t.r })),
-    }));
+    const accounts: AccountRow[] = state.accounts
+      .map((a) => ({
+        ...a,
+        balance: +a.balance,
+        risk_pct: +a.risk_pct,
+        max_leverage: +a.max_leverage,
+        start_balance: +a.start_balance,
+        life: +(a.life ?? 1) || 1,
+        recent: (a.recent ?? []).map((t) => ({ ...t, r: t.r == null ? null : +t.r })),
+      }))
+      // An account on a timeframe its strategy does not trade (created by an older bot_sync) is left alone.
+      .filter((a) => {
+        const tfs = STRATEGY_BY_KEY[a.strategy]?.timeframes;
+        return !tfs || tfs.includes(a.timeframe as Timeframe);
+      });
+    /** The aggressive accounts' playbooks, as learned up to this run (see step 1b). */
+    const playbooks = new Map<string, Playbook>();
     const news = state.news ?? null;
     const accById = new Map(accounts.map((a) => [a.id, a]));
     const open: TradeRow[] = state.open_trades.map(numTrade);
@@ -224,6 +239,9 @@ export async function runTick({
     }
     await flush();
 
+    /** Aggressive accounts' trades closed by this run: they are not in the state read at its start (step 1b's post-mortem needs them). */
+    const closedThisRun = new Map<string, AggroTradeRow[]>();
+
     // ── 1. Stops, targets, liquidations on 1-minute candles ──
     for (const symbol of SYMBOLS) {
       const trades = () => open.filter((t) => t.symbol === symbol);
@@ -255,6 +273,7 @@ export async function runTick({
                   summary.closed++;
                   const acc = accById.get(t.account_id);
                   if (acc) noteClosed(acc, t.symbol, res);
+                  if (acc && isAggro(acc.strategy)) closedThisRun.set(acc.id, [...(closedThisRun.get(acc.id) ?? []), { ...(res.trade as unknown as AggroTradeRow), aggro: t.aggro ?? null }]);
                 }
                 continue;
               }
@@ -269,6 +288,94 @@ export async function runTick({
         }
       } catch (e) {
         recordError(e, `stop check ${symbol}`, { symbol });
+      }
+    }
+    await flush();
+
+    // ── 1b. Aggressive accounts: learn, end a life, start the next ──
+    // The playbook is only ever written here, under the run lock, so nothing is learned twice.
+    const margins = (accId: string) => open.filter((x) => x.account_id === accId).reduce((s, x) => s + x.margin, 0);
+    const lifeTrade = (t: AggroTradeRow): LifeTrade => ({ facets: t.aggro?.facets ?? null, r: learnedR(t), net: +(t.net_pnl ?? 0), closed_at: t.closed_at ?? iso(now()) });
+    for (const acc of accounts.filter((x) => isAggro(x.strategy))) {
+      const base = { user_id: acc.user_id, account_id: acc.id, timeframe: acc.timeframe };
+      try {
+        const st = state.aggro?.[acc.id] ?? { trades: [], signals: [] };
+        const stored = readPlaybook(acc.playbook);
+        const pb = stored ?? newPlaybook(AGGRO_SEED[acc.timeframe]);
+        let dirty = !stored;
+
+        // Outcomes not learned yet: the account's closed trades and its replayed signals.
+        const outcomes: Outcome[] = [];
+        for (const t of st.trades) {
+          const r = learnedR(t);
+          if (t.aggro?.facets && r != null) outcomes.push({ facets: t.aggro.facets, r, raw: t.aggro.raw });
+        }
+        for (const s of st.signals) {
+          const facets = facetsOf(s.features);
+          if (facets && s.outcome_r != null) outcomes.push({ facets, r: +s.outcome_r, raw: typeof s.features.pb_raw === "number" ? s.features.pb_raw : null });
+        }
+        if (outcomes.length) learn(pb, outcomes);
+        // Rows without a context are marked learned as well, so they are not fetched again.
+        let ids = { trade_ids: st.trades.map((t) => t.id), signal_ids: st.signals.map((s) => s.id) };
+        if (ids.trade_ids.length || ids.signal_ids.length) dirty = true;
+        /** Written to the log only once the playbook that records it is stored, so a failed save cannot repeat it. */
+        let ended: EventRow | null = null;
+        const save = async () => {
+          // The stored playbook must still be the one this run read (rev): a save never overwrites another run's.
+          const prev = pb.rev;
+          pb.rev = prev + 1;
+          await db.savePlaybook({ account_id: acc.id, playbook: pb, prev_rev: prev, ...ids });
+          ids = { trade_ids: [], signal_ids: [] };
+          dirty = false;
+          if (ended) events.push(ended);
+          ended = null;
+        };
+
+        // The life's closed trades as of the start of the run, plus the ones this run's stop check closed.
+        const lifeTrades = st.life_trades ? [...st.life_trades, ...(closedThisRun.get(acc.id) ?? [])].map(lifeTrade) : null;
+        if (acc.redeploy_requested_at) {
+          // The life is over: what is still open is closed at the market first.
+          for (const t of open.filter((x) => x.account_id === acc.id)) {
+            const last = (await market.klines(t.symbol, "1m", { limit: 1 })).pop();
+            if (!last) throw new Error(`no price for ${t.symbol}`);
+            const res = await db.closeTrade({ id: t.id, price: last.close, reason: "signal", feeRate: TAKER_FEE, at: iso(now()), note: "Closed at market: the owner redeployed the account, which ends this life." });
+            removeTrade(open, t.id);
+            updates.delete(t.id);
+            if (res) {
+              summary.closed++;
+              noteClosed(acc, t.symbol, res);
+              lifeTrades?.push(lifeTrade({ ...(res.trade as unknown as AggroTradeRow), aggro: t.aggro ?? null }));
+            }
+          }
+        }
+        // The post-mortem needs the life's trades, which the state carries from the run after the life ended.
+        // A busted account's is written once nothing is open any more, so it covers every trade of the life.
+        const over = acc.redeploy_requested_at != null || (acc.status === "busted" && !open.some((x) => x.account_id === acc.id));
+        if (over && pb.autopsied < acc.life! && lifeTrades) {
+          const rec = autopsy(pb, {
+            life: acc.life!,
+            startedAt: acc.life_started_at ?? null,
+            endedAt: iso(now()),
+            startBalance: acc.start_balance,
+            endEquity: acc.balance + margins(acc.id),
+            cause: acc.status === "busted" ? "busted" : "redeployed",
+            trades: lifeTrades,
+          });
+          ended = { ...base, kind: "life_ended", message: rec.summary, data: { life: rec.life, cause: rec.cause, peak: rec.peak, end: rec.end, fatal: rec.fatal } };
+          dirty = true;
+        }
+        if (acc.redeploy_requested_at) {
+          if (dirty) await save();
+          await flush(); // the life's last events are written before the next life's first
+          const next = await db.redeploy(acc.id, iso(now()));
+          Object.assign(acc, { balance: +next.balance, start_balance: +next.start_balance, status: next.status, life: +next.life, life_started_at: next.life_started_at, redeploy_requested_at: null, recent: [] });
+        }
+        if (rollDay(pb, now(), acc.balance + margins(acc.id), acc.life!)) dirty = true;
+        if (dirty) await save();
+        playbooks.set(acc.id, pb);
+      } catch (e) {
+        // Without a playbook the account sits this run out (evaluateAggro); the next run starts from what is stored.
+        recordError(e, `playbook ${acc.timeframe}`, base);
       }
     }
     await flush();
@@ -316,16 +423,11 @@ export async function runTick({
       }
     }
 
-    async function evaluate(acc: AccountRow, symbol: string, tf: Timeframe, closed: Candle[], price: number) {
-      const strat = STRATEGY_BY_KEY[acc.strategy];
-      if (!strat || closed.length < strat.warmup) return;
+    /** Manages an open trade at a bar close with the rule set that owns it. Returns true when the trade was closed. */
+    async function manageOpen(acc: AccountRow, strat: StrategyDef, t: TradeRow, symbol: string, tf: Timeframe, closed: Candle[], price: number) {
       const at = now();
-      const signalBar = closed[closed.length - 1];
       const base = { user_id: acc.user_id, account_id: acc.id, symbol, timeframe: tf };
-
-      // Manage the open trade (if any).
-      const t = open.find((x) => x.account_id === acc.id && x.symbol === symbol);
-      if (t) {
+      {
         const barsHeld = closed.filter((c) => c.time * 1000 > ms(t.signal_bar_time)).length;
         const m = strat.manage(closed, { side: t.side, entryPrice: t.entry_price, stop: t.stop_price, takeProfit: t.take_profit, barsHeld });
         let exit: { reason: string; note: string; feeRate: number } | null = null;
@@ -369,8 +471,23 @@ export async function runTick({
             summary.closed++;
             noteClosed(acc, symbol, res);
           }
-        } else return; // still in a trade: no new entry on this symbol
+          return true;
+        }
+        return false;
       }
+    }
+
+    async function evaluate(acc: AccountRow, symbol: string, tf: Timeframe, closed: Candle[], price: number) {
+      const strat = STRATEGY_BY_KEY[acc.strategy];
+      if (!strat || closed.length < strat.warmup) return;
+      if (strat.pool) return evaluateAggro(acc, symbol, tf, closed, price);
+      const at = now();
+      const signalBar = closed[closed.length - 1];
+      const base = { user_id: acc.user_id, account_id: acc.id, symbol, timeframe: tf };
+
+      // Manage the open trade (if any). Still in a trade: no new entry on this symbol.
+      const t = open.find((x) => x.account_id === acc.id && x.symbol === symbol);
+      if (t && !(await manageOpen(acc, strat, t, symbol, tf, closed, price))) return;
 
       if (!acc.enabled) return;
       if (pending.some((p) => p.account_id === acc.id && p.symbol === symbol)) return; // an entry order is still resting here
@@ -509,6 +626,122 @@ export async function runTick({
       acc.balance = +res.balance;
       open.push(numTrade(res.trade));
       summary.opened++;
+    }
+
+    /**
+     * An aggressive account at a bar close (aggro.ts, playbook.ts): the open trade is managed by the
+     * rule set that produced it; then every rule set's signal on this bar is rated by the playbook
+     * and the best one is traded, with the risk its expected R justifies. The other gates (confluence,
+     * news, cooldown, lessons, probation) do not apply. Every signal that is not traded is kept as a
+     * shadow signal, so the playbook learns from all of them. Entries are always market orders.
+     */
+    async function evaluateAggro(acc: AccountRow, symbol: string, tf: Timeframe, closed: Candle[], price: number) {
+      const pb = playbooks.get(acc.id);
+      const at = now();
+      const signalBar = closed[closed.length - 1];
+      const base = { user_id: acc.user_id, account_id: acc.id, symbol, timeframe: tf };
+
+      let holding = false;
+      const t = open.find((x) => x.account_id === acc.id && x.symbol === symbol);
+      if (t) {
+        const owner = STRATEGY_BY_KEY[t.aggro?.src ?? ""];
+        // A trade whose rule set is unknown keeps its stop and target; it is only not trailed.
+        holding = owner ? !(await manageOpen(acc, owner, t, symbol, tf, closed, price)) : true;
+      }
+      // Without its playbook (step 1b failed this run) the account still manages its trade; it only opens nothing.
+      if (!acc.enabled || !pb) return;
+
+      const f = await getFilters(symbol);
+      const rated = rate(pb, aggroCandidates({ candles: closed, timeframe: tf, symbol, at, tick: f.tick, entry: price }));
+      if (!rated.length) return;
+
+      const shadow = (x: Rated, reason: SkipReason, why: string) => {
+        const dir = x.c.side === "long" ? "Long" : "Short";
+        summary.signalsFiltered++;
+        summary.filteredByReason[reason] = (summary.filteredByReason[reason] ?? 0) + 1;
+        filtered.push({
+          account_id: acc.id,
+          reason,
+          lesson_ids: [],
+          symbol,
+          side: x.c.side,
+          entry_price: price,
+          stop_price: x.c.stop,
+          take_profit: x.c.takeProfit,
+          signal_bar_time: iso(signalBar.time * 1000),
+          // The raw estimate goes with the signal, so the replayed outcome can be checked against it (calibration).
+          features: { ...x.c.features, pb_raw: +x.est.raw.toFixed(4) },
+        });
+        events.push({ ...base, kind: "skipped", message: `${dir} signal (${x.c.strategy.name}) not taken: ${why}`, data: { reason, src: x.c.strategy.key, exp: +x.est.exp.toFixed(3) } });
+      };
+
+      const guard = dayGuard(pb, acc.balance + margins(acc.id));
+      const blocked: { reason: SkipReason; why: string } | null =
+        acc.status !== "active"
+          ? { reason: "busted", why: "the account is busted. Redeploy it to start the next life; the signal is still replayed for learning." }
+          : holding
+            ? { reason: "playbook", why: `the account already holds a ${symbol.replace(/USDT$/, "")} trade.` }
+            : guard.block
+              ? { reason: "playbook", why: guard.why }
+              : null;
+      let taken: Rated | null = null;
+      for (const x of rated) {
+        if (blocked) {
+          shadow(x, blocked.reason, blocked.why);
+          continue;
+        }
+        if (taken) {
+          shadow(x, "playbook", `a better-rated signal on this bar was taken (${taken.c.strategy.name}).`);
+          continue;
+        }
+        if (x.risk.pct <= 0) {
+          shadow(x, "playbook", x.risk.why);
+          continue;
+        }
+        const equity = acc.balance + margins(acc.id);
+        const sized = sizePosition({
+          side: x.c.side,
+          entry: price,
+          stop: x.c.stop,
+          equity,
+          freeBalance: acc.balance,
+          stepSize: f.step,
+          settings: { riskPct: x.risk.pct, maxLeverage: acc.max_leverage, slots: SYMBOLS.length },
+        });
+        if ("skip" in sized) {
+          shadow(x, "min_stop", sized.skip);
+          continue;
+        }
+        const res = await db.openTrade({
+          account_id: acc.id,
+          symbol,
+          side: x.c.side,
+          qty: sized.qty,
+          entry_price: price,
+          leverage: sized.leverage,
+          stop_price: x.c.stop,
+          take_profit: x.c.takeProfit,
+          risk_usd: sized.riskUsd,
+          risk_pct: sized.riskPctActual,
+          signal_bar_time: iso(signalBar.time * 1000),
+          opened_at: iso(at),
+          entry_reason: `[${x.c.strategy.name}] ${x.c.reason} ${x.c.cf.summary} Playbook: ${x.risk.why}`,
+          // The news reading is stored like on every other trade, although no news gate applies here.
+          entry_indicators: { ...x.c.indicators, ...newsReadings(newsFor(news, symbol, at)), pbExp: +x.est.exp.toFixed(4), pbSamples: Math.round(x.est.n), pbRiskPct: +(x.risk.pct * 100).toFixed(2) },
+          sizing_notes: [
+            `Playbook: ${explain(x.est)}. Expected ${x.est.exp >= 0 ? "+" : ""}${x.est.exp.toFixed(2)}R.`,
+            `Risk ${(x.risk.pct * 100).toFixed(2)}% of $${equity.toFixed(2)} equity = $${(equity * x.risk.pct).toFixed(2)}. The stop is ${(sized.stopPct * 100).toFixed(2)}% away, so the size is ${sized.qty} ${symbol.replace(/USDT$/, "")} ($${sized.notional.toFixed(2)} notional).`,
+            `Leverage ${sized.leverage}x: the lowest that fits the $${Math.min(equity / SYMBOLS.length, acc.balance).toFixed(2)} margin budget (equity ÷ ${SYMBOLS.length} coins). Liquidation at ${fmt(sized.liqPrice)}, beyond the stop.`,
+            ...sized.notes,
+            `Today so far: ${guard.pnl >= 0 ? "+" : ""}${(guard.pnl * 100).toFixed(1)}%. Life ${acc.life}.`,
+          ],
+          aggro: { src: x.c.strategy.key, facets: x.c.facets, exp: +x.est.exp.toFixed(4), raw: +x.est.raw.toFixed(4), n: Math.round(x.est.n), risk: x.risk.pct },
+        });
+        acc.balance = +res.balance;
+        open.push(numTrade(res.trade));
+        summary.opened++;
+        taken = x;
+      }
     }
   } catch (e) {
     fatal = e instanceof Error ? e.message : String(e);

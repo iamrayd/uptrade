@@ -21,7 +21,8 @@ const S = { riskPct: 0.02, maxLeverage: 20, slots: 3 };
 // ───────── 1. retired setups ─────────
 
 test("the persistent losers are retired: short timeframes for every strategy, plus the named higher-timeframe setups and their news twins", () => {
-  for (const s of STRATEGIES) for (const tf of ["5m", "15m", "30m"]) assert.equal(isRetired(s.key, tf), true, `${s.key} ${tf}`);
+  for (const s of STRATEGIES.filter((x) => !x.pool)) for (const tf of ["5m", "15m", "30m"]) assert.equal(isRetired(s.key, tf), true, `${s.key} ${tf}`);
+  assert.equal(isRetired("aggro", "15m"), false, "the aggressive accounts are outside the retired list: their playbook decides");
   for (const [k, tf] of [["ema_trend", "1h"], ["donchian", "1h"], ["supertrend", "1h"], ["macd_adx", "4h"], ["supertrend", "4h"]]) assert.equal(isRetired(k, tf), true, `${k} ${tf}`);
   assert.equal(isRetired("donchian_news", "1h"), true, "a news twin shares its original's trigger and exits");
   assert.equal(isRetired("supertrend_news", "4h"), true);

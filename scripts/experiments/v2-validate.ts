@@ -87,7 +87,7 @@ for (const key of ["ema_trend", "macd_adx"]) {
 // ───── 2. Maker entries (limit at the signal close, 5m fill model, live timeout) vs taker ─────
 console.log(`\n=== 2. ENTRIES: taker at the next open vs maker limit at the signal close (must fill within the live timeout; ${FINE} candles, none starting in the first minute after the close is counted, as live) ===`);
 console.log("setup               | taker older    | taker newer    | maker older    | maker newer    | filled");
-const live = STRATEGIES.filter((s: any) => !s.newsAware).flatMap((s: any) => TFS.filter((tf) => !isRetired(s.key, tf)).map((tf) => ({ s, tf })));
+const live = STRATEGIES.filter((s: any) => !s.newsAware && !s.pool).flatMap((s: any) => TFS.filter((tf) => !isRetired(s.key, tf)).map((tf) => ({ s, tf })));
 const tot = { tk: [] as any[], mk: [] as any[] };
 for (const { s, tf } of live) {
   const tk = run(s, tf), mk = run(s, tf, { maker: true });

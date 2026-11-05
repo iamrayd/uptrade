@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runAnalysis, type Narrator } from "../../supabase/functions/_shared/bot/analyze.ts";
+import { strategyMeta } from "../../supabase/functions/_shared/bot/io.ts";
 import { STRATEGIES } from "../../supabase/functions/_shared/bot/strategies.ts";
 import { TIMEFRAMES } from "../../supabase/functions/_shared/bot/types.ts";
 import { fakeMarket, freshDb, pgAnalysisDb, pgDb, syntheticMinutes, USER, OTHER_USER } from "./helpers.ts";
@@ -15,7 +16,7 @@ test("analysis: reviews, learns a lesson from the losers, writes reports, and re
   await pg.query(`insert into auth.users (id) values ($1), ($2)`, [USER, OTHER_USER]);
   await pg.query(`insert into public.bot_settings (user_id) values ($1)`, [USER]);
   const db = pgDb(pg);
-  await db.sync(STRATEGIES.map(({ key, name, version, summary, rules, params }) => ({ key, name, version, summary, rules, params })), TIMEFRAMES);
+  await db.sync(strategyMeta(STRATEGIES), TIMEFRAMES);
   const acc = (await pg.query<{ id: string }>(`select id from public.bot_accounts where strategy = 'ema_trend' and timeframe = '1h'`)).rows[0];
 
   // 60 closed ema_trend 1h trades, one every 7 hours: entries with ADX under 20 always lose,
@@ -49,7 +50,7 @@ test("analysis: reviews, learns a lesson from the losers, writes reports, and re
   const calls: string[] = [];
   const narrator: Narrator = async ({ kind, data }) => {
     calls.push(kind);
-    assert.ok(data.setups.length === STRATEGIES.length * TIMEFRAMES.length);
+    assert.equal(data.setups.length, STRATEGIES.reduce((n, s) => n + (s.timeframes?.length ?? TIMEFRAMES.length), 0), "one setup per account");
     return {
       model: "test-model",
       narrative: {

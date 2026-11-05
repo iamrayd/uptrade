@@ -90,6 +90,11 @@ const REPLAY_WARMUP = 450;
 const postBars = (tf: string) => Math.min(10, Math.floor((3 * 86400) / (TF_SECONDS[tf as Timeframe] ?? 3600)));
 
 const num = (v: unknown) => (v == null ? null : +(v as number));
+/** True for a meta strategy (the aggressive accounts): its own playbook tunes it, not the per-setup tuner or the lesson miner. */
+const isMeta = (strategy: string) => STRATEGY_BY_KEY[strategy]?.pool != null;
+/** The rule set whose stops and exits a signal is replayed with: for an aggressive account's signal, the one that produced it. */
+const replayStrategy = (s: { strategy: string; features?: Record<string, unknown> | null }) =>
+  isMeta(s.strategy) ? STRATEGY_BY_KEY[String(s.features?.src ?? "")] : STRATEGY_BY_KEY[s.strategy];
 const mean = (xs: number[]) => xs.reduce((s, x) => s + x, 0) / xs.length;
 
 export function parseTrade(r: Record<string, unknown>): AnalysisTrade {
@@ -181,7 +186,7 @@ export async function runAnalysis(a: {
   // One candle request covers every pending signal of a symbol × timeframe inside its window.
   const feeds = new Map<string, FilteredSignalRow[]>();
   for (const s of state.pending_signals) {
-    if (!STRATEGY_BY_KEY[s.strategy]) continue;
+    if (!replayStrategy(s)) continue;
     feeds.set(`${s.symbol}|${s.timeframe}`, [...(feeds.get(`${s.symbol}|${s.timeframe}`) ?? []), s]);
   }
   for (const [feed, list] of feeds) {
@@ -208,10 +213,10 @@ export async function runAnalysis(a: {
           continue;
         }
         try {
-          const sim = simulateSignal(STRATEGY_BY_KEY[s.strategy], candles, idx, { side: s.side, entry: +s.entry_price, stop: +s.stop_price, takeProfit: num(s.take_profit) }, replayBars(tfSec));
+          const sim = simulateSignal(replayStrategy(s)!, candles, idx, { side: s.side, entry: +s.entry_price, stop: +s.stop_price, takeProfit: num(s.take_profit) }, replayBars(tfSec));
           if (!sim.done) continue; // still open: next run
           // The same signal with the breakeven-stop variant: the pair is how the rule is judged (tuning.ts).
-          const simBe = simulateSignal(STRATEGY_BY_KEY[s.strategy], candles, idx, { side: s.side, entry: +s.entry_price, stop: +s.stop_price, takeProfit: num(s.take_profit) }, replayBars(tfSec), true);
+          const simBe = simulateSignal(replayStrategy(s)!, candles, idx, { side: s.side, entry: +s.entry_price, stop: +s.stop_price, takeProfit: num(s.take_profit) }, replayBars(tfSec), true);
           resolved.push({
             id: s.id,
             outcome_r: sim.rSlip,
@@ -278,6 +283,15 @@ export async function runAnalysis(a: {
         const st = setups[i];
         const tune: AccountTune = { id: acc.id };
         if (st.verdict !== acc.verdict) tune.verdict = st.verdict;
+        if (isMeta(acc.strategy)) {
+          // An aggressive account only gets its verdict here: probation, the confluence bar, the
+          // breakeven stop and conviction sizing do not apply to it.
+          if (tune.verdict) {
+            tunes.push(tune);
+            summary.accountsTuned++;
+          }
+          continue;
+        }
         const accShadows = resolvedSignals.filter((s) => s.account_id === acc.id && s.outcome_r != null);
         const accTrades = mine.filter((t) => t.account_id === acc.id);
         // Promotion is judged on the probation replays only: those are the entries that passed
@@ -344,7 +358,8 @@ export async function runAnalysis(a: {
       }
 
       const inForce = myLessons.filter((l) => l.status === "active" || l.status === "proposed");
-      const learned = mineLessons(mine, taken, inForce, shadow).map((m) => addLesson(m.strategy, m.timeframe, m.rule, m.title, m.explanation, m.evidence, "mined"));
+      // No entry filters are mined for the aggressive accounts: their playbook is their filter.
+      const learned = mineLessons(mine.filter((t) => !isMeta(t.strategy)), taken, inForce, shadow.filter((s) => !isMeta(s.strategy))).map((m) => addLesson(m.strategy, m.timeframe, m.rule, m.title, m.explanation, m.evidence, "mined"));
       const retired = myLessons.filter((l) => changes.get(l.id)?.status === "retired");
 
       for (const kind of ["daily", "weekly", "monthly", "hourly"] as ReportKind[]) {
@@ -365,7 +380,7 @@ export async function runAnalysis(a: {
             // The AI's filter ideas only become lessons if the data backs them up on newer trades.
             for (const c of res.narrative.candidate_filters ?? []) {
               const rule = parseRule(c);
-              if (!rule || !STRATEGY_BY_KEY[c.strategy] || taken.has(lessonKey(c.strategy, c.timeframe, rule))) continue;
+              if (!rule || !STRATEGY_BY_KEY[c.strategy] || isMeta(c.strategy) || taken.has(lessonKey(c.strategy, c.timeframe, rule))) continue;
               const sc = scopeOf(c.strategy, c.timeframe);
               const ev = evaluateRule(sc.trades, rule, sc.shadow);
               if (!ev.passed) continue;

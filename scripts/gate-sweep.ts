@@ -73,7 +73,7 @@ async function main() {
     const bySym: Record<string, Candle[]> = {};
     for (const s of SYMBOLS) bySym[s] = await history(s, tf, from, end);
     const data = align(bySym);
-    for (const strat of STRATEGIES.filter((s) => !s.newsAware)) {
+    for (const strat of STRATEGIES.filter((s) => !s.newsAware && !s.pool)) {
       for (const v of VARIANTS) {
         const common = { strategy: strat, timeframe: tf, candlesBySymbol: data, filters, settings: SETTINGS, startBalance: START_BALANCE, minConfluence: v.minConfluence, discipline: v.discipline };
         const win = (m: Map<string, Agg>, r: BtResult) => add(m.get(v.name) ?? m.set(v.name, empty()).get(v.name)!, r);

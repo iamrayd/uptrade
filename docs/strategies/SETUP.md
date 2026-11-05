@@ -50,7 +50,7 @@ After pulling this version, do all of these, in this order:
    ```
 3. Re-run [`supabase/bot_cron.sql`](../../supabase/bot_cron.sql) with your project ref and secret (it adds the news job).
 
-Don't delete the old trades: they are what the bots learn from. The next `bot-tick` run creates the accounts for the new "+ News" strategies. Existing lessons keep working; any that were waiting only because the old limit was 3 per setup go live if they still hold on today's data.
+Don't delete the old trades: they are what the bots learn from. The next `bot-tick` run creates the accounts for any new strategy (the "+ News" twins, the v2 strategies, the two aggressive accounts). Run the SQL before deploying the functions: an older `bot_sync` would create the aggressive accounts on every timeframe (the runner ignores the extra ones). Existing lessons keep working; any that were waiting only because the old limit was 3 per setup go live if they still hold on today's data.
 
 ## Checking it's healthy
 

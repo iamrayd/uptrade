@@ -1,6 +1,7 @@
 import type { Candle } from "./types.ts";
 import type { RecentTrade } from "./discipline.ts";
 import type { NewsState } from "./news.ts";
+import type { Facets } from "./playbook.ts";
 
 export interface SymbolFilters {
   step: number;
@@ -82,6 +83,46 @@ export interface AccountRow {
   verdict: string | null;
   /** Latest closed trades, oldest first. */
   recent: RecentTrade[];
+  /** Aggressive accounts: which life the account is in (1 = the first). */
+  life?: number;
+  life_started_at?: string | null;
+  /** Aggressive accounts: what the account has learned (playbook.ts). Null until its first run. */
+  playbook?: unknown;
+  /** Set when the owner asked for a redeploy that has not been carried out yet. */
+  redeploy_requested_at?: string | null;
+}
+
+/** What the playbook chose a trade for: the rule set that produced the signal and its context. */
+export interface TradeAggro {
+  src: string;
+  facets: Facets;
+  /** Expected R at entry (what was traded on), the raw record-based estimate behind it, and the rule set's sample count. */
+  exp: number;
+  raw?: number;
+  n: number;
+  /** Share of equity the playbook asked to risk. */
+  risk: number;
+}
+
+/** An aggressive account's closed trade, as far as the playbook needs it. */
+export interface AggroTradeRow {
+  id: string;
+  aggro: TradeAggro | null;
+  r_multiple: number | null;
+  qty: number;
+  entry_price: number;
+  exit_price: number | null;
+  risk_usd: number;
+  net_pnl?: number | null;
+  closed_at?: string;
+}
+
+/** What an aggressive account's playbook has not processed yet. */
+export interface AggroLearnState {
+  trades: AggroTradeRow[];
+  signals: { id: string; features: Record<string, number | string>; outcome_r: number }[];
+  /** The current life's closed trades, present only when the life has ended and has no post-mortem yet. */
+  life_trades?: AggroTradeRow[] | null;
 }
 
 export interface TradeRow {
@@ -106,6 +147,10 @@ export interface TradeRow {
   checked_until: string;
   mfe_price: number | null;
   mae_price: number | null;
+  /** The account's life the trade was opened in. */
+  life?: number | null;
+  /** Aggressive accounts only. */
+  aggro?: TradeAggro | null;
 }
 
 /** An active lesson: skip entries that match its rule (see analysis.ts). */
@@ -153,10 +198,12 @@ export interface BotState {
   lessons?: LessonRow[];
   /** Latest crypto-news read (null before bot-news has run). */
   news?: (NewsState & { updated_at: string }) | null;
+  /** Per aggressive account id. */
+  aggro?: Record<string, AggroLearnState>;
 }
 
-/** Why a signal was not traded. */
-export type SkipReason = "lesson" | "confluence" | "cooldown" | "news" | "busted" | "probation" | "min_stop" | "unfilled";
+/** Why a signal was not traded. "playbook": an aggressive account's playbook passed on it. */
+export type SkipReason = "lesson" | "confluence" | "cooldown" | "news" | "busted" | "probation" | "min_stop" | "unfilled" | "playbook";
 
 export interface FilteredSignalInput {
   account_id: string;
@@ -212,6 +259,8 @@ export interface OpenTradeInput {
   entry_fee_rate?: number;
   /** The resting order this fill came from; it is removed in the same transaction. */
   pending_id?: string;
+  /** Aggressive accounts: the rule set and context the playbook chose the trade for. */
+  aggro?: TradeAggro;
 }
 
 export interface StrategyMeta {
@@ -221,7 +270,15 @@ export interface StrategyMeta {
   summary: string;
   rules: string;
   params: Record<string, number>;
+  /** The only timeframes the strategy gets an account on (omitted: all). */
+  timeframes?: readonly string[];
+  /** Present on a meta strategy (the aggressive accounts). */
+  pool?: readonly string[];
 }
+
+/** The strategy rows bot_sync takes, from the strategy definitions. */
+export const strategyMeta = (list: { key: string; name: string; version: number; summary: string; rules: string; params: Record<string, number>; timeframes?: readonly string[]; pool?: readonly string[] }[]): StrategyMeta[] =>
+  list.map(({ key, name, version, summary, rules, params, timeframes, pool }) => ({ key, name, version, summary, rules, params, ...(timeframes ? { timeframes } : {}), ...(pool ? { pool } : {}) }));
 
 export interface Db {
   lock(ttlSeconds: number): Promise<boolean>;
@@ -241,6 +298,10 @@ export interface Db {
   updateTrades(u: TradeUpdate[]): Promise<void>;
   log(events: EventRow[]): Promise<void>;
   logFiltered(rows: FilteredSignalInput[]): Promise<void>;
+  /** Stores an aggressive account's playbook and marks the outcomes that went into it as learned (all or nothing). */
+  savePlaybook(p: { account_id: string; playbook: unknown; trade_ids: string[]; signal_ids: string[]; /** The `rev` of the stored playbook this one was built from: the save is refused if another run has saved since. */ prev_rev?: number }): Promise<void>;
+  /** Starts an aggressive account's next life. */
+  redeploy(accountId: string, at: string): Promise<{ balance: number; start_balance: number; status: "active" | "busted"; life: number; life_started_at: string }>;
 }
 
 // ───────────────────────── Analysis (bot-analyze) ─────────────────────────
@@ -406,6 +467,8 @@ export function restDb(url: string, serviceKey: string): Db {
     updateTrades: async (u) => void (u.length && (await rpc("bot_update_trades", { p: u }))),
     log: async (e) => void (e.length && (await rpc("bot_log", { p: e }))),
     logFiltered: async (f) => void (f.length && (await rpc("bot_log_filtered", { p: f }))),
+    savePlaybook: async (p) => void (await rpc("bot_save_playbook", { p })),
+    redeploy: (id, at) => rpc("bot_redeploy", { p_account_id: id, p_at: at }),
   };
 }
 

@@ -67,7 +67,7 @@ async function main() {
       console.log(bySym[s].length);
     }
     const data = align(bySym);
-    for (const strat of STRATEGIES.filter((s) => !s.newsAware)) {
+    for (const strat of STRATEGIES.filter((s) => !s.newsAware && !s.pool)) {
       const t0 = Date.now();
       const run = (discipline: boolean) =>
         backtest({ strategy: strat, timeframe: tf, candlesBySymbol: data, filters, settings: SETTINGS, startBalance: START_BALANCE, from: start, minConfluence: GATE, discipline, slippage: SLIP, makerEntry: MAKER });

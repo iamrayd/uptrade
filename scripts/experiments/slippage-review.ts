@@ -100,7 +100,7 @@ const pct = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`;
 console.log("\n=== 1. LIVE CONFIG (gate 65 + discipline, 2% risk) WITH 0.05%/side SLIPPAGE ===");
 console.log("setup            | yr ret | avgR  | PF   | n    | maxDD | older avgR (n) | newer avgR (n) | $/day");
 const live: any[] = [];
-for (const tf of TIMEFRAMES) for (const st of STRATEGIES.filter((s: Strat) => !s.newsAware)) {
+for (const tf of TIMEFRAMES) for (const st of STRATEGIES.filter((s: Strat) => !s.newsAware && !s.pool)) {
   const r = run(st, tf, { gate: 65 });
   const all = dailyStats(r.trades, START, END);
   const old = r.trades.filter((t: any) => t.exitTime < MID);
@@ -134,7 +134,7 @@ function portfolio(setups: { st: Strat; tf: string }[], o: Opts, from = START, t
 }
 const hi = (keys: string[]) => keys.map((k) => { const [key, tf] = k.split(" "); return { st: STRATEGIES.find((s: Strat) => s.key === key)!, tf }; });
 
-const P_ALL_HTF = hi(TIMEFRAMES.filter((t: string) => ["1h", "4h", "1d"].includes(t)).flatMap((tf: string) => STRATEGIES.filter((s: Strat) => !s.newsAware).map((s: Strat) => `${s.key} ${tf}`)));
+const P_ALL_HTF = hi(TIMEFRAMES.filter((t: string) => ["1h", "4h", "1d"].includes(t)).flatMap((tf: string) => STRATEGIES.filter((s: Strat) => !s.newsAware && !s.pool).map((s: Strat) => `${s.key} ${tf}`)));
 const P_PICKED = picked.map((x) => ({ st: x.st, tf: x.tf }));
 const P_TOP_INSAMPLE = live.slice(0, 5).map((x) => ({ st: x.st, tf: x.tf }));
 

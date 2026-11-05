@@ -1,5 +1,6 @@
 import type { Candle, ManageResult, Side, StrategyDef } from "./types.ts";
 import { atr, bollinger, dmi, ema, highest, lowest, macd, rsi, sma, supertrend } from "./indicators.ts";
+import { AGGRO, AGGRO_KEY } from "./playbook.ts";
 
 // Five widely used crypto strategies. Each one looks only at CLOSED bars, so a
 // signal can't repaint. Stops are ATR- or structure-based; position size is
@@ -463,6 +464,45 @@ function withNews(base: StrategyDef): StrategyDef {
   };
 }
 
+// ───────────────────────── Aggressive: the playbook trader ─────────────────────────
+//
+// Not a rule set of its own. An aggressive account sees the signals of every rule set below on
+// its timeframe and lets a learned playbook (playbook.ts) decide which to take and how much to
+// risk. The trade is then managed by the rule set that produced it. The engine handles it in
+// its own branch (tick.ts, aggro.ts); entry() here never signals.
+
+const AGGRO_POOL = [emaTrend, bbRsi, donchian, macdAdx, supertrendStrat, emaTrendV2, macdAdxV2];
+const pc = (n: number) => `${+(n * 100).toFixed(1)}%`;
+
+export const aggro: StrategyDef = {
+  key: AGGRO_KEY,
+  name: "Aggressive (playbook)",
+  version: 1,
+  summary: `Takes the best-rated signal of all ${AGGRO_POOL.length} rule sets and risks up to ${pc(AGGRO.maxRisk)} of equity on it, sized by a playbook that learns from every signal. Aims for +${pc(AGGRO.dayTarget)} a day; it can bust, and a redeploy keeps what it learned.`,
+  params: { maxRiskPct: AGGRO.maxRisk * 100, minRiskPct: AGGRO.minRisk * 100, minEdgeR: AGGRO.minEdge, dayTargetPct: AGGRO.dayTarget * 100, dayStopPct: AGGRO.dayStop * 100, priorSamples: AGGRO.prior },
+  warmup: Math.max(...AGGRO_POOL.map((s) => s.warmup)),
+  timeframes: ["15m", "1h"],
+  pool: AGGRO_POOL.map((s) => s.key),
+  rules: `**Idea.** A high-risk account that does not own a rule set. It watches the signals of every rule set and bets on the ones its own record says pay, as large as that record justifies. It is built to compound fast or bust, and to come back knowing more.
+
+**Signals.** On every closed bar, each of these rule sets is asked for an entry: ${AGGRO_POOL.map((s) => s.key).join(", ")}. The confluence gate, the cooldown, lessons and probation do not apply here: the playbook decides.
+
+**Context.** Every signal is described by: the rule set, the side, the coin, the next timeframe up (with / against / mixed), the confluence band, volatility (ATR against its 100-bar average), trend strength (ADX), the side of EMA 200 and the UTC session.
+
+**Playbook.** For every context the account keeps the average result in R of all signals it has seen there, traded or not (untraded ones are replayed after slippage). The expected R of a new signal starts from all signals, moves to its rule set, then to each context of that rule set; every step is shrunk with ${AGGRO.prior} phantom samples, so a few lucky trades change little. Old samples fade, so the playbook follows the current market.
+
+**Entry.** The best-rated signal on a coin is traded if its expected R is at least +${AGGRO.minEdge}R and its rule set has ${AGGRO.minSamples}+ samples. One position per coin. Every other signal is kept and replayed, so it still teaches.
+
+**Risk**
+- Risk per trade = expected R × ${AGGRO.kelly}, between ${pc(AGGRO.minRisk)} and ${pc(AGGRO.maxRisk)} of equity. Leverage and margin caps are the shared ones, so the real risk can be lower.
+- Stop, target and trailing: those of the rule set that produced the signal.
+- Day target: once the account is up ${pc(AGGRO.dayTarget)} on the UTC day it stops entering. Day loss limit: the same at ${pc(AGGRO.dayStop)}.
+
+**Lives.** Under $10 of equity the account is busted. **Redeploy** starts the next life at the starting balance with the playbook intact. Each ended life gets a post-mortem, and the losing trades between its peak and its end are learned a second time.`,
+  entry: () => null,
+  manage: () => ({}),
+};
+
 export const STRATEGIES: StrategyDef[] = [
   emaTrend,
   bbRsi,
@@ -472,6 +512,7 @@ export const STRATEGIES: StrategyDef[] = [
   emaTrendV2,
   macdAdxV2,
   ...[emaTrend, bbRsi, donchian, macdAdx, supertrendStrat].filter((s) => NEWS_TWINS.includes(s.key)).map(withNews),
+  aggro,
 ];
 export const STRATEGY_BY_KEY: Record<string, StrategyDef> = Object.fromEntries(STRATEGIES.map((s) => [s.key, s]));
 

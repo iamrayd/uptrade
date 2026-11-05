@@ -1,4 +1,5 @@
 import { CONFLUENCE } from "./confluence.ts";
+import { AGGRO_KEY } from "./playbook.ts";
 
 // Per-setup tuning decisions, made hourly by the analyzer (analyze.ts) and written to
 // bot_accounts via bot_tune_accounts. Pure functions, so the tests can drive them directly.
@@ -49,8 +50,9 @@ export const RETIRED = {
   setups: ["ema_trend 1h", "donchian 1h", "supertrend 1h", "macd_adx 4h", "supertrend 4h"],
 };
 
+/** The aggressive accounts are outside this list: their own playbook decides what they trade (playbook.ts). */
 export const isRetired = (strategy: string, timeframe: string) =>
-  RETIRED.timeframes.includes(timeframe) || RETIRED.setups.includes(`${strategy.replace(/_news$/, "")} ${timeframe}`);
+  strategy !== AGGRO_KEY && (RETIRED.timeframes.includes(timeframe) || RETIRED.setups.includes(`${strategy.replace(/_news$/, "")} ${timeframe}`));
 
 const mean = (xs: number[]) => xs.reduce((s, x) => s + x, 0) / xs.length;
 function sd(xs: number[]) {

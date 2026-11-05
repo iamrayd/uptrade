@@ -162,7 +162,7 @@ test("prices snap to the exchange tick; stops round away from price", () => {
 test("every strategy emits well-formed signals on synthetic markets", () => {
   for (const tfSec of [300, 3600]) {
     const c = aggregate(syntheticMinutes(11, T0, tfSec === 300 ? 60 * 24 * 12 : 60 * 24 * 80, 100), tfSec);
-    for (const s of STRATEGIES) {
+    for (const s of STRATEGIES.filter((x) => !x.pool)) {
       let signals = 0;
       let skips = 0;
       for (let i = s.warmup; i < c.length; i++) {

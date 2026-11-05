@@ -98,7 +98,7 @@ create table if not exists public.bot_events (
   trade_id    uuid references public.bot_trades on delete cascade,
   symbol      text,
   timeframe   text,
-  kind        text not null,       -- placed | opened | closed | skipped | stop_moved | missed_bar | error
+  kind        text not null,       -- placed | opened | closed | skipped | stop_moved | missed_bar | error | life_ended | redeploy | redeployed
   message     text not null,
   data        jsonb not null default '{}',
   created_at  timestamptz not null default now()
@@ -182,7 +182,7 @@ create index if not exists bot_filtered_user_idx on public.bot_filtered_signals 
 
 -- Every signal a bot did not trade is kept and replayed, not only the ones a lesson blocked: they are the
 -- data a busted or heavily filtered bot keeps learning from.
--- reason = lesson | confluence | cooldown | news | busted | probation | min_stop | unfilled.
+-- reason = lesson | confluence | cooldown | news | busted | probation | min_stop | unfilled | playbook.
 alter table public.bot_filtered_signals add column if not exists reason text not null default 'lesson';
 create index if not exists bot_filtered_resolved_idx on public.bot_filtered_signals (resolved_at desc) where resolved_at is not null;
 -- The replay's R with the breakeven-stop variant (stop to fee cover at +1R), next to the plain outcome_r,
@@ -209,9 +209,23 @@ alter table public.bot_accounts add column if not exists conviction boolean not 
 -- The setup's latest verdict from the analyzer (live_ready | promising | unproven | needs_data | avoid).
 alter table public.bot_accounts add column if not exists verdict text;
 
+-- ── Aggressive accounts (strategy 'aggro': playbook.ts, aggro.ts) ──
+-- One account trades the signals of every rule set, sized by a playbook it learns. It is expected to
+-- bust now and then; a redeploy starts the next "life" at the starting balance and keeps the playbook.
+alter table public.bot_accounts add column if not exists life int not null default 1;
+alter table public.bot_accounts add column if not exists life_started_at timestamptz;        -- null: the first life (created_at)
+alter table public.bot_accounts add column if not exists playbook jsonb;                     -- written only by bot-tick
+alter table public.bot_accounts add column if not exists redeploy_requested_at timestamptz;  -- set by the owner, carried out by the next bot-tick run
+alter table public.bot_trades add column if not exists life int;                             -- the account's life the trade was opened in
+alter table public.bot_trades add column if not exists aggro jsonb;                          -- {src, facets, exp, n, risk}: the rule set and context the playbook chose
+-- Set once an outcome is in the playbook, so nothing is learned twice.
+alter table public.bot_trades add column if not exists learned_at timestamptz;
+alter table public.bot_filtered_signals add column if not exists learned_at timestamptz;
+create index if not exists bot_filtered_unlearned_idx on public.bot_filtered_signals (account_id) where learned_at is null and outcome_r is not null;
+
 -- Seed probation for the short timeframes (one-time: only rows that have never been tuned).
 update public.bot_accounts set probation = true, probation_changed_at = now()
- where timeframe in ('5m','15m','30m') and probation = false and probation_changed_at is null;
+ where timeframe in ('5m','15m','30m') and probation = false and probation_changed_at is null and strategy <> 'aggro';
 
 -- Retired setups (tuning.ts RETIRED): the year replay with slippage showed them losing in both halves of
 -- the year, so they are held on probation whatever their replays say. The engine enforces this in code
@@ -345,13 +359,17 @@ begin
     rules = excluded.rules, params = excluded.params, updated_at = now();
 
   -- New 5m/15m/30m accounts start on probation (shadow-only) until their replays prove an edge.
+  -- A strategy with a "timeframes" list only gets accounts on those; a meta strategy (one with a
+  -- "pool", the aggressive accounts) is never put on probation: its playbook decides what it trades.
   insert into public.bot_accounts (user_id, strategy, timeframe, balance, start_balance, probation, probation_changed_at)
   select st.user_id, s->>'key', tf, st.start_balance, st.start_balance,
-         tf in ('5m','15m','30m'), case when tf in ('5m','15m','30m') then now() end
+         tf in ('5m','15m','30m') and not (s ? 'pool'),
+         case when tf in ('5m','15m','30m') and not (s ? 'pool') then now() end
     from public.bot_settings st
     cross join jsonb_array_elements(p_strategies) s
     cross join unnest(p_timeframes) tf
    where st.enabled
+     and (not (s ? 'timeframes') or jsonb_typeof(s->'timeframes') <> 'array' or s->'timeframes' ? tf)
   on conflict (user_id, strategy, timeframe) do nothing;
 end $$;
 
@@ -365,6 +383,8 @@ returns jsonb language sql stable set search_path = public as $$
         'balance', a.balance, 'status', a.status, 'start_balance', a.start_balance,
         'probation', a.probation, 'min_confluence', a.min_confluence,
         'breakeven', a.breakeven, 'conviction', a.conviction, 'verdict', a.verdict,
+        'life', a.life, 'life_started_at', coalesce(a.life_started_at, a.created_at),
+        'playbook', a.playbook, 'redeploy_requested_at', a.redeploy_requested_at,
         'enabled', coalesce(s.enabled, false),
         'risk_pct', coalesce(s.risk_pct, 0.02), 'max_leverage', coalesce(s.max_leverage, 20),
         -- Latest 10 closed trades, oldest first: the engine sizes down while an account is losing and waits after a loss.
@@ -383,7 +403,27 @@ returns jsonb language sql stable set search_path = public as $$
         'id', l.id, 'user_id', l.user_id, 'strategy', l.strategy, 'timeframe', l.timeframe,
         'feature', l.feature, 'op', l.op, 'value', l.value, 'title', l.title))
       from public.bot_lessons l where l.status = 'active'), '[]'),
-    'news', (select data || jsonb_build_object('updated_at', updated_at) from public.bot_news where id = 1)
+    'news', (select data || jsonb_build_object('updated_at', updated_at) from public.bot_news where id = 1),
+    -- Per aggressive account: the outcomes its playbook has not learned yet (closed trades and replayed
+    -- signals), and, when a life has ended and has no post-mortem yet, that life's closed trades.
+    'aggro', coalesce((
+      select jsonb_object_agg(a.id, jsonb_build_object(
+        'trades', coalesce((
+          select jsonb_agg(jsonb_build_object('id', t.id, 'aggro', t.aggro, 'r_multiple', t.r_multiple, 'qty', t.qty,
+                                              'entry_price', t.entry_price, 'exit_price', t.exit_price, 'risk_usd', t.risk_usd) order by t.closed_at)
+            from (select * from public.bot_trades where account_id = a.id and status = 'closed' and learned_at is null
+                   order by closed_at limit 500) t), '[]'),
+        'signals', coalesce((
+          select jsonb_agg(jsonb_build_object('id', f.id, 'features', f.features, 'outcome_r', f.outcome_r) order by f.signal_bar_time)
+            from (select * from public.bot_filtered_signals where account_id = a.id and outcome_r is not null and learned_at is null
+                   order by signal_bar_time limit 1000) f), '[]'),
+        'life_trades', case when (a.status = 'busted' or a.redeploy_requested_at is not null)
+                             and coalesce((a.playbook->>'autopsied')::int, 0) < a.life then coalesce((
+          select jsonb_agg(jsonb_build_object('id', t.id, 'aggro', t.aggro, 'r_multiple', t.r_multiple, 'qty', t.qty,
+                                              'entry_price', t.entry_price, 'exit_price', t.exit_price, 'risk_usd', t.risk_usd,
+                                              'net_pnl', t.net_pnl, 'closed_at', t.closed_at) order by t.closed_at)
+            from public.bot_trades t where t.account_id = a.id and t.status = 'closed' and t.life = a.life), '[]') end))
+        from public.bot_accounts a where a.strategy = 'aggro'), '{}')
   )
 $$;
 
@@ -464,7 +504,7 @@ begin
   insert into public.bot_trades (
     user_id, account_id, strategy, timeframe, symbol, side, qty, entry_price, leverage, margin, liq_price,
     initial_stop, stop_price, take_profit, risk_usd, risk_pct, entry_fee, signal_bar_time, opened_at,
-    entry_reason, entry_indicators, sizing_notes, checked_until, mfe_price, mae_price)
+    entry_reason, entry_indicators, sizing_notes, checked_until, mfe_price, mae_price, life, aggro)
   values (
     v_acc.user_id, v_acc.id, v_acc.strategy, v_acc.timeframe, upper(p->>'symbol'), v_side, v_qty, v_price, v_lev, v_margin,
     coalesce(public._liq_price(v_side, v_price, v_qty, v_margin), 0),
@@ -472,7 +512,7 @@ begin
     (p->>'signal_bar_time')::timestamptz, v_at,
     p->>'entry_reason', coalesce(p->'entry_indicators', '{}'),
     coalesce(array(select jsonb_array_elements_text(p->'sizing_notes')), '{}'),
-    date_trunc('minute', v_at), v_price, v_price)
+    date_trunc('minute', v_at), v_price, v_price, v_acc.life, nullif(p->'aggro', 'null'::jsonb))
   returning * into v_trade;
 
   update public.bot_accounts set balance = balance - v_margin - v_fee where id = v_acc.id
@@ -555,6 +595,80 @@ begin
   return jsonb_build_object('trade', to_jsonb(v_t), 'balance', v_acc.balance, 'status', v_acc.status);
 end $$;
 
+-- Stores an aggressive account's playbook and marks the outcomes that went into it as learned:
+-- {account_id, playbook, trade_ids?, signal_ids?}. All or nothing: if any of the outcomes was
+-- already learned (two runs overlapped), nothing is written and the next run starts from the stored playbook.
+create or replace function public.bot_save_playbook(p jsonb)
+returns void language plpgsql set search_path = public as $$
+declare
+  v_id       uuid := (p->>'account_id')::uuid;
+  v_trades   uuid[] := array(select jsonb_array_elements_text(coalesce(p->'trade_ids', '[]')))::uuid[];
+  v_signals  uuid[] := array(select jsonb_array_elements_text(coalesce(p->'signal_ids', '[]')))::uuid[];
+  v_n        int;
+begin
+  if p->'playbook' is null or jsonb_typeof(p->'playbook') <> 'object' then raise exception 'invalid playbook'; end if;
+  update public.bot_trades set learned_at = now()
+   where id = any(v_trades) and account_id = v_id and status = 'closed' and learned_at is null;
+  get diagnostics v_n = row_count;
+  if v_n <> coalesce(array_length(v_trades, 1), 0) then raise exception 'playbook not saved: a trade was already learned'; end if;
+  update public.bot_filtered_signals set learned_at = now()
+   where id = any(v_signals) and account_id = v_id and learned_at is null;
+  get diagnostics v_n = row_count;
+  if v_n <> coalesce(array_length(v_signals, 1), 0) then raise exception 'playbook not saved: a signal was already learned'; end if;
+  -- Only over the revision the run read: a slow run can never overwrite what a later run has learned.
+  update public.bot_accounts set playbook = p->'playbook'
+   where id = v_id and (not (p ? 'prev_rev') or coalesce((playbook->>'rev')::int, 0) = (p->>'prev_rev')::int);
+  if not found then raise exception 'playbook not saved: the account is missing or another run saved a newer playbook'; end if;
+end $$;
+
+-- Starts an aggressive account's next life: the starting balance again, active, life + 1. The playbook
+-- is not touched. Called by bot-tick once the ended life's open trades are closed and its post-mortem
+-- is written. Returns the account's new {balance, start_balance, status, life, life_started_at}.
+create or replace function public.bot_redeploy(p_account_id uuid, p_at timestamptz default now())
+returns jsonb language plpgsql set search_path = public as $$
+declare
+  v_acc    public.bot_accounts;
+  v_start  numeric;
+begin
+  select * into v_acc from public.bot_accounts where id = p_account_id for update;
+  if not found then raise exception 'bot account not found'; end if;
+  if v_acc.strategy <> 'aggro' then raise exception 'only an aggressive account can be redeployed'; end if;
+  if exists (select 1 from public.bot_trades where account_id = v_acc.id and status = 'open') then
+    raise exception 'bot account still has open trades';
+  end if;
+  select start_balance into v_start from public.bot_settings where user_id = v_acc.user_id;
+  v_start := coalesce(v_start, v_acc.start_balance);
+  delete from public.bot_pending_entries where account_id = v_acc.id;
+  update public.bot_accounts
+     set balance = v_start, start_balance = v_start, status = 'active', life = life + 1,
+         life_started_at = coalesce(p_at, now()), redeploy_requested_at = null
+   where id = v_acc.id
+  returning * into v_acc;
+  insert into public.bot_events (user_id, account_id, timeframe, kind, message, data)
+  values (v_acc.user_id, v_acc.id, v_acc.timeframe, 'redeployed',
+          'Life ' || v_acc.life || ' started with $' || trim_scale(round(v_start, 2))::text || '. The playbook is kept.',
+          jsonb_build_object('life', v_acc.life, 'balance', v_start));
+  return jsonb_build_object('balance', v_acc.balance, 'start_balance', v_acc.start_balance, 'status', v_acc.status,
+                            'life', v_acc.life, 'life_started_at', v_acc.life_started_at);
+end $$;
+
+-- The owner asks for a redeploy. bot-tick carries it out within a minute: it closes what is still
+-- open at market, writes the life's post-mortem and starts the next life.
+create or replace function public.bot_request_redeploy(p_account_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_acc public.bot_accounts;
+begin
+  update public.bot_accounts set redeploy_requested_at = coalesce(redeploy_requested_at, now())
+   where id = p_account_id and user_id = auth.uid() and strategy = 'aggro'
+  returning * into v_acc;
+  if not found then raise exception 'aggressive bot account not found'; end if;
+  insert into public.bot_events (user_id, account_id, timeframe, kind, message)
+  values (v_acc.user_id, v_acc.id, v_acc.timeframe, 'redeploy',
+          'Redeploy requested: life ' || v_acc.life || ' ends at the next bot run and the next one starts with the playbook kept.');
+end $$;
+revoke all on function public.bot_request_redeploy(uuid) from public, anon;
+grant execute on function public.bot_request_redeploy(uuid) to authenticated;
+
 -- Batch update of open trades: [{id, stop_price?, trailed?, mfe_price?, mae_price?, checked_until?, stop_event?}]
 create or replace function public.bot_update_trades(p jsonb)
 returns void language plpgsql set search_path = public as $$
@@ -621,14 +735,18 @@ returns jsonb language sql stable set search_path = public as $$
     'lessons', coalesce((select jsonb_agg(to_jsonb(l)) from public.bot_lessons l), '[]'),
     'pending_signals', coalesce((
       select jsonb_agg(to_jsonb(f) order by f.created_at)
-        from (select * from public.bot_filtered_signals where resolved_at is null order by created_at limit 800) f), '[]'),
+        -- The aggressive accounts log far more signals than the others, so they have their own quota.
+        from (select * from (select * from public.bot_filtered_signals where resolved_at is null and strategy <> 'aggro' order by created_at limit 800) o
+              union all
+              select * from (select * from public.bot_filtered_signals where resolved_at is null and strategy = 'aggro' order by created_at limit 600) g) f), '[]'),
     -- Replayed signals are learning data (and the recent record of each lesson), newest 4000.
     'resolved_signals', coalesce((
       select jsonb_agg(jsonb_build_object(
         'id', f.id, 'user_id', f.user_id, 'account_id', f.account_id, 'strategy', f.strategy, 'timeframe', f.timeframe,
         'symbol', f.symbol, 'side', f.side, 'features', f.features, 'outcome_r', f.outcome_r, 'outcome_r_be', f.outcome_r_be, 'reason', f.reason,
         'lesson_ids', f.lesson_ids, 'signal_bar_time', f.signal_bar_time, 'resolved_at', f.resolved_at) order by f.signal_bar_time)
-        from (select * from public.bot_filtered_signals where resolved_at is not null and outcome_r is not null
+        -- Not the aggressive accounts' signals: their playbook learns them in bot-tick, and they would crowd the others out of this window.
+        from (select * from public.bot_filtered_signals where resolved_at is not null and outcome_r is not null and strategy <> 'aggro'
                order by resolved_at desc limit 4000) f), '[]'),
     'last_reports', coalesce((
       select jsonb_agg(jsonb_build_object('user_id', user_id, 'kind', kind, 'period_start', period_start))
@@ -747,7 +865,8 @@ begin
     'bot_set_cursor(text, timestamptz)', 'bot_open_trade(jsonb)', 'bot_place_entry(jsonb)', 'bot_cancel_entries(uuid[])',
     'bot_close_trade(uuid, numeric, text, numeric, timestamptz, text)', 'bot_update_trades(jsonb)', 'bot_log(jsonb)',
     'bot_log_filtered(jsonb)', 'bot_analysis_state()', 'bot_save_reviews(jsonb)', 'bot_resolve_signals(jsonb)',
-    'bot_save_lessons(jsonb)', 'bot_save_report(jsonb)', 'bot_save_news(jsonb)', 'bot_tune_accounts(jsonb)'
+    'bot_save_lessons(jsonb)', 'bot_save_report(jsonb)', 'bot_save_news(jsonb)', 'bot_tune_accounts(jsonb)',
+    'bot_save_playbook(jsonb)', 'bot_redeploy(uuid, timestamptz)'
   ] loop
     execute format('revoke all on function public.%s from public, anon, authenticated', f);
     execute format('grant execute on function public.%s to service_role', f);

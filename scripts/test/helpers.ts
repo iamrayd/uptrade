@@ -154,6 +154,8 @@ export function pgDb(pg: PGlite): Db {
     updateTrades: async (u) => void (u.length && (await call("select public.bot_update_trades($1::jsonb) r", [j(u)]))),
     log: async (e) => void (e.length && (await call("select public.bot_log($1::jsonb) r", [j(e)]))),
     logFiltered: async (f) => void (f.length && (await call("select public.bot_log_filtered($1::jsonb) r", [j(f)]))),
+    savePlaybook: async (p) => void (await call("select public.bot_save_playbook($1::jsonb) r", [j(p)])),
+    redeploy: (id, at) => call("select public.bot_redeploy($1::uuid, $2::timestamptz) r", [id, at]),
   };
 }
 

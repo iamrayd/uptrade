@@ -1,6 +1,6 @@
 # UpTrade strategy bots
 
-Five widely used crypto strategies, trailing-exit (v2) variants of two of them and news-aware twins of three of them, each tested on six timeframes, run around the clock against live Binance prices. Every **strategy × timeframe** pair is its own **$100 paper account** (60 accounts in total), so the results can be compared fairly. Not every account trades with capital: see [Retired setups](#retired-setups).
+Five widely used crypto strategies, trailing-exit (v2) variants of two of them and news-aware twins of three of them, each tested on six timeframes, run around the clock against live Binance prices. Every **strategy × timeframe** pair is its own **$100 paper account** (60 accounts), so the results can be compared fairly. Two [aggressive accounts](#aggressive-accounts) trade the signals of all of them with a learned playbook. Not every account trades with capital: see [Retired setups](#retired-setups).
 
 | Strategy | Type | Entry | Exit | Doc |
 |---|---|---|---|---|
@@ -49,6 +49,25 @@ A year replay of the live configuration with 0.05% slippage per side ([V2-PLAN.m
 - **EMA Trend 1h, Donchian 1h, Supertrend 1h, MACD + ADX 4h, Supertrend 4h** (negative in both halves of the year), and their news twins
 
 The list lives in `tuning.ts` (`RETIRED`). The v2 strategies are new rule sets, so only the short timeframes are closed to them.
+
+## Aggressive accounts
+
+Two more $100 accounts, **Aggressive 15m** and **Aggressive 1h** ([aggro.md](aggro.md)), work differently from all the others. They own no rule set. On every bar they see the signals of all seven plain rule sets and a learned **playbook** decides which one to take and how much to risk on it: up to 10% of equity per trade, against 2% for the ordinary bots. They aim for +10% a day, they can bust, and that is accepted.
+
+- **Playbook.** Every signal is described by its context (rule set, side, coin, higher-timeframe trend, confluence band, volatility, trend strength, side of EMA 200, session). The playbook keeps the average result in R of every signal it has seen in each context, traded or not: untraded signals are replayed by the analyzer, so the account learns from all of them. A new account starts from a replay of the past year (`aggro-seed.ts`).
+- **Calibration.** The playbook also checks its own estimates against what the signals then did, and trades on the corrected number. The slope of that correction is learned, sign included: if well-rated contexts keep doing worse (a move that has paid is often spent), it bets against the record.
+- **Day target.** No new entries for the rest of the UTC day once the account is up 10% or down 15% on the day.
+- **Lives.** Under $10 the account is busted. **Redeploy** on the account's page ends the current life and starts the next at $100 with the playbook kept; the next bot run closes what is open, writes the life's post-mortem and starts it. The losing trades between a life's peak and its end are learned a second time.
+- The confluence gate, the cooldown, lessons, probation and the retired list do not apply to them, and the per-setup tuner leaves them alone.
+
+**What a year of history says** (`scripts/experiments/aggro-replay.ts`, output in `aggro-replay.out.txt`; 0.05% slippage per taker fill, the playbook learning as it goes, so every decision is out of sample):
+
+| | Signals seen | On their own | Trades taken | Per trade | $100 after the year | Days at +10% or more |
+|---|---:|---:|---:|---:|---:|---:|
+| Aggressive 15m | 15,603 | −0.198R | 0 | — | $100.00 | 0 |
+| Aggressive 1h | 4,027 | −0.015R | 111 | −0.029R | $58.58 | 4 |
+
+The honest reading: there is no edge in these rule sets on 15m after costs, and the playbook learns that and stops trading there. On 1h it trades rarely and loses slowly. Its estimate does not sort good signals from bad ones in the replay. **+10% a day is the aim, not something the data supports.** Without calibration (`AGGRO.calibration = false`) the accounts trade more and lose more: about −$41 on 15m, and −$118 on 1h with one bust, over the same year (`scripts/experiments/aggro-variants.ts`, output in `aggro-variants.out.txt`). In that mode the signals the record rated best did worse than the ones it rated worst, on 15m, 1h and 4h alike.
 
 ## How a trade is executed
 

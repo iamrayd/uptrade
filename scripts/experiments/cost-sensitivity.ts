@@ -29,7 +29,7 @@ const agg: Record<string, { n: number; sumR: number; net: number; gw: number; gl
 const perSetup: string[] = [];
 let totalHold = 0, totalN = 0;
 const reasonAgg: Record<string, { n: number; r: number }> = {};
-for (const tf of TFS) for (const st of STRATEGIES.filter((s: any) => !s.newsAware)) {
+for (const tf of TFS) for (const st of STRATEGIES.filter((s: any) => !s.newsAware && !s.pool)) {
   const r = backtest({ strategy: st, timeframe: tf, candlesBySymbol: data[tf], filters, settings: { riskPct: 0.02, maxLeverage: 20, slots: 3 }, startBalance: 100, from: START, minConfluence: 65, discipline: true });
   const row: string[] = [`${st.key} ${tf}`.padEnd(16)];
   for (const [name, m] of Object.entries(MODELS)) {

@@ -120,6 +120,38 @@ export interface BotAccount {
   start_balance: number;
   status: "active" | "busted";
   created_at: string;
+  /** Which life the account is in (aggressive accounts restart at the starting balance on a redeploy). */
+  life: number;
+  life_started_at: string | null;
+  /** Aggressive accounts: what the account has learned. Null for the others, and before the first run. */
+  playbook: BotPlaybook | null;
+  /** Set while a redeploy the owner asked for is waiting for the next bot run. */
+  redeploy_requested_at: string | null;
+}
+
+/** Mirrors Playbook in supabase/functions/_shared/bot/playbook.ts. */
+export interface BotPlaybook {
+  v: 1;
+  /** Cell key → [weighted count, weighted sum of R]. */
+  cells: Record<string, [number, number]>;
+  learned: number;
+  cal?: { n: number; sx: number; sy: number; sxx: number; sxy: number };
+  day: { date: string; start: number; life: number } | null;
+  autopsied: number;
+  lives: BotLifeRecord[];
+}
+
+export interface BotLifeRecord {
+  life: number;
+  started_at: string | null;
+  ended_at: string;
+  cause: "busted" | "redeployed";
+  trades: number;
+  wins: number;
+  peak: number;
+  end: number;
+  fatal: { key: string; label: string; n: number; r: number }[];
+  summary: string;
 }
 
 export interface BotTrade {
@@ -160,6 +192,10 @@ export interface BotTrade {
   r_multiple: number | null;
   /** Post-mortem written by the hourly analysis (null until reviewed). */
   review: BotTradeReview | null;
+  /** The account's life the trade was opened in. */
+  life: number | null;
+  /** Aggressive accounts: the rule set the playbook chose the trade from, and what it expected. */
+  aggro: { src: string; exp: number; raw?: number; n: number; risk: number } | null;
 }
 
 export interface BotTradeReview {

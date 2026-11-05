@@ -17,7 +17,7 @@ for (const s of STRATEGIES) {
     "",
     s.summary,
     "",
-    `**Timeframes:** ${TIMEFRAMES.join(", ")}. Each timeframe is its own $100 account trading BTC, ETH and SOL, at most one position per coin.`,
+    `**Timeframes:** ${(s.timeframes ?? TIMEFRAMES).join(", ")}. Each timeframe is its own $100 account trading BTC, ETH and SOL, at most one position per coin.`,
     "",
     s.rules,
     "",

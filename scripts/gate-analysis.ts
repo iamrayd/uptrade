@@ -44,7 +44,7 @@ async function main() {
     const bySym: Record<string, Candle[]> = {};
     for (const s of SYMBOLS) bySym[s] = await history(s, tf, from, end);
     const data = align(bySym);
-    for (const strat of STRATEGIES.filter((s) => !s.newsAware)) {
+    for (const strat of STRATEGIES.filter((s) => !s.newsAware && !s.pool)) {
       const r = backtest({ strategy: strat, timeframe: tf, candlesBySymbol: data, filters, settings: SETTINGS, startBalance: 100, from: start, trackConfluence: true });
       for (const t of r.tradeList) if (t.cf) rows.push({ ...t, strategy: strat.key, timeframe: tf });
     }

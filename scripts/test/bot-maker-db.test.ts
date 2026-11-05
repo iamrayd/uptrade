@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runTick } from "../../supabase/functions/_shared/bot/tick.ts";
+import { strategyMeta } from "../../supabase/functions/_shared/bot/io.ts";
 import { STRATEGIES } from "../../supabase/functions/_shared/bot/strategies.ts";
 import { TIMEFRAMES } from "../../supabase/functions/_shared/bot/types.ts";
 import type { OpenTradeInput } from "../../supabase/functions/_shared/bot/io.ts";
@@ -11,7 +12,7 @@ import { fakeMarket, freshDb, pgDb, syntheticMinutes, USER } from "./helpers.ts"
 
 const DAY = 86400;
 const START = 1_760_000_000 - (1_760_000_000 % DAY);
-const metaOf = STRATEGIES.map(({ key, name, version, summary, rules, params }) => ({ key, name, version, summary, rules, params }));
+const metaOf = strategyMeta(STRATEGIES);
 const iso = (sec: number) => new Date(sec * 1000).toISOString();
 
 test("maker entries: a resting limit fills on the first 1m candle that trades through it, with no entry fee; an unreached one lapses into a shadow signal", { timeout: 300_000 }, async () => {
@@ -148,9 +149,11 @@ test("maker entries: a strategy signal rests as a limit at the signal close or b
     placed += s.entriesPlaced;
     opened += s.opened;
   }
-  const trades = (await pg.query<Record<string, unknown>>(`select * from public.bot_trades order by opened_at`)).rows;
+  // The aggressive accounts always enter at the market, so they are left out of this test of resting orders.
+  const trades = (await pg.query<Record<string, unknown>>(`select * from public.bot_trades where strategy <> 'aggro' order by opened_at`)).rows;
+  const aggroTrades = (await pg.query<{ n: number }>(`select count(*)::int n from public.bot_trades where strategy = 'aggro'`)).rows[0].n;
   assert.ok(trades.length >= 10, `only ${trades.length} trades`);
-  assert.equal(opened, trades.length);
+  assert.equal(opened, trades.length + aggroTrades);
   const unfilled = (await pg.query<{ n: number }>(`select count(*)::int n from public.bot_filtered_signals where reason = 'unfilled'`)).rows[0].n;
   const resting = (await pg.query<{ n: number }>(`select count(*)::int n from public.bot_pending_entries`)).rows[0].n;
   assert.equal(placed, trades.length + unfilled + resting, "every order placed was filled, lapsed or is still resting");
