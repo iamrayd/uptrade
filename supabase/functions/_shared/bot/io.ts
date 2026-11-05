@@ -120,9 +120,35 @@ export interface LessonRow {
   title: string;
 }
 
+/** An entry limit order resting at the signal close (maker entries, risk.ts ENTRY). */
+export interface PendingEntryRow {
+  id: string;
+  user_id: string;
+  account_id: string;
+  timeframe: string;
+  symbol: string;
+  side: "long" | "short";
+  limit_price: number;
+  placed_at: string;
+  expires_at: string;
+  /** The trade it becomes when it fills. */
+  payload: OpenTradeInput;
+  /** Entry features, for the shadow signal if it lapses unfilled. */
+  features: Record<string, number | string>;
+}
+
+export interface PlaceEntryInput {
+  account_id: string;
+  placed_at: string;
+  expires_at: string;
+  features: Record<string, number | string>;
+  payload: OpenTradeInput;
+}
+
 export interface BotState {
   accounts: AccountRow[];
   open_trades: TradeRow[];
+  pending_entries?: PendingEntryRow[];
   cursors: Record<string, string>;
   lessons?: LessonRow[];
   /** Latest crypto-news read (null before bot-news has run). */
@@ -130,7 +156,7 @@ export interface BotState {
 }
 
 /** Why a signal was not traded. */
-export type SkipReason = "lesson" | "confluence" | "cooldown" | "news" | "busted" | "probation" | "min_stop";
+export type SkipReason = "lesson" | "confluence" | "cooldown" | "news" | "busted" | "probation" | "min_stop" | "unfilled";
 
 export interface FilteredSignalInput {
   account_id: string;
@@ -182,6 +208,10 @@ export interface OpenTradeInput {
   entry_reason: string;
   entry_indicators: Record<string, number>;
   sizing_notes: string[];
+  /** Fee on the entry fill; omitted: taker (a market order). 0 for a filled limit order. */
+  entry_fee_rate?: number;
+  /** The resting order this fill came from; it is removed in the same transaction. */
+  pending_id?: string;
 }
 
 export interface StrategyMeta {
@@ -200,6 +230,9 @@ export interface Db {
   getState(): Promise<BotState>;
   setCursor(key: string, barTimeIso: string): Promise<void>;
   openTrade(p: OpenTradeInput): Promise<{ trade: TradeRow; balance: number }>;
+  /** Rests an entry limit order until it fills or lapses. */
+  placeEntry(p: PlaceEntryInput): Promise<void>;
+  cancelEntries(ids: string[]): Promise<void>;
   closeTrade(a: { id: string; price: number; reason: string; feeRate: number; at: string; note: string }): Promise<{
     trade: TradeRow & { net_pnl: number; r_multiple: number | null; closed_at: string };
     balance: number;
@@ -366,6 +399,8 @@ export function restDb(url: string, serviceKey: string): Db {
     getState: () => rpc<BotState>("bot_get_state", {}),
     setCursor: async (key, t) => void (await rpc("bot_set_cursor", { p_key: key, p_bar_time: t })),
     openTrade: (p) => rpc("bot_open_trade", { p }),
+    placeEntry: async (p) => void (await rpc("bot_place_entry", { p })),
+    cancelEntries: async (ids) => void (ids.length && (await rpc("bot_cancel_entries", { p_ids: ids }))),
     closeTrade: (a) =>
       rpc("bot_close_trade", { p_trade_id: a.id, p_price: a.price, p_reason: a.reason, p_fee_rate: a.feeRate, p_at: a.at, p_note: a.note }),
     updateTrades: async (u) => void (u.length && (await rpc("bot_update_trades", { p: u }))),

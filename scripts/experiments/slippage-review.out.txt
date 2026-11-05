@@ -1,0 +1,114 @@
+(node:26468) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///C:/Users/SOFTWARE%20DEVELOPER/Desktop/Work/junk/test/New%20folder/uptrade/supabase/functions/_shared/bot/strategies.ts is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to \\?\C:\Users\SOFTWARE DEVELOPER\Desktop\Work\junk\test\New folder\uptrade\package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+=== 1. LIVE CONFIG (gate 65 + discipline, 2% risk) WITH 0.05%/side SLIPPAGE ===
+setup            | yr ret | avgR  | PF   | n    | maxDD | older avgR (n) | newer avgR (n) | $/day
+donchian 4h      | +20.1% | 0.240 | 1.14 |  159 |  32.9 | -0.024 ( 78) |  0.442 ( 84) | 0.055
+donchian 1d      | +13.8% | 0.440 | 1.86 |   23 |   5.8 |  0.231 ( 13) |  0.653 ( 10) | 0.038
+bb_rsi 30m       | +12.9% | 0.103 | 1.14 |   71 |  22.2 |  0.212 ( 43) | -0.065 ( 28) | 0.035
+ema_trend 1d     |  +3.5% | 0.306 | 1.29 |   12 |   7.4 |  0.511 (  6) |  0.324 (  5) | 0.010
+bb_rsi 1d        |  +2.6% | 1.296 |    — |    1 |   0.0 |  0.000 (  0) |  1.296 (  1) | 0.007
+macd_adx 1d      |  +1.0% | 0.259 | 1.16 |   14 |   3.6 |  0.769 (  6) | -0.124 (  8) | 0.003
+supertrend 1d    |  -2.3% | 0.032 | 0.63 |    9 |   6.1 | -0.774 (  5) |  1.217 (  5) | -0.006
+bb_rsi 1h        |  -2.5% | -0.023 | 0.95 |   44 |  14.1 |  0.006 ( 22) | -0.052 ( 22) | -0.007
+bb_rsi 4h        |  -5.2% | -0.069 | 0.65 |   11 |   6.6 |  0.312 (  6) | -0.527 (  5) | -0.014
+macd_adx 1h      | -12.1% | -0.041 | 0.95 |  238 |  36.6 | -0.016 (111) | -0.062 (127) | -0.033
+ema_trend 4h     | -14.5% | -0.068 | 0.83 |   77 |  26.1 | -0.117 ( 39) | -0.017 ( 38) | -0.040
+macd_adx 4h      | -21.7% | -0.099 | 0.61 |   67 |  25.4 |  0.108 ( 33) | -0.300 ( 34) | -0.059
+supertrend 1h    | -23.1% | -0.044 | 0.86 |  267 |  33.3 | -0.006 (132) | -0.080 (136) | -0.063
+supertrend 4h    | -26.5% | -0.224 | 0.35 |   62 |  28.4 | -0.344 ( 31) | -0.105 ( 31) | -0.073
+bb_rsi 5m        | -39.4% | -0.115 | 0.73 |  126 |  41.7 | -0.112 ( 81) | -0.122 ( 45) | -0.108
+bb_rsi 15m       | -48.7% | -0.371 | 0.50 |   95 |  50.0 | -0.291 ( 50) | -0.461 ( 45) | -0.133
+supertrend 30m   | -49.1% | -0.060 | 0.76 |  465 |  64.5 | -0.100 (219) | -0.025 (246) | -0.134
+ema_trend 1h     | -62.6% | -0.170 | 0.73 |  306 |  64.0 | -0.146 (168) | -0.199 (138) | -0.172
+macd_adx 30m     | -77.0% | -0.085 | 0.78 |  447 |  90.3 | -0.104 (231) | -0.066 (216) | -0.211
+donchian 1h      | -79.0% | 0.002 | 0.81 |  635 |  80.4 | -0.029 (310) |  0.036 (325) | -0.216
+ema_trend 30m    | -104.5% | -0.254 | 0.59 |  581 | 104.5 | -0.234 (296) | -0.276 (285) | -0.286
+macd_adx 15m     | -116.8% | -0.164 | 0.68 |  623 | 121.3 | -0.208 (375) | -0.099 (248) | -0.320
+supertrend 15m   | -119.8% | -0.029 | 0.84 |  875 | 117.5 | -0.033 (441) | -0.025 (434) | -0.328
+ema_trend 5m     | -129.5% | -0.270 | 0.57 |  858 | 129.6 | -0.338 (571) | -0.136 (287) | -0.355
+donchian 30m     | -133.4% | -0.071 | 0.76 | 1220 | 133.4 | -0.059 (626) | -0.084 (592) | -0.366
+macd_adx 5m      | -146.2% | -0.234 | 0.56 |  742 | 146.2 | -0.199 (504) | -0.307 (238) | -0.401
+ema_trend 15m    | -156.9% | -0.238 | 0.67 |  825 | 155.0 | -0.240 (459) | -0.235 (366) | -0.430
+donchian 15m     | -232.0% | -0.152 | 0.73 | 2231 | 232.0 | -0.110 (1169) | -0.199 (1059) | -0.636
+supertrend 5m    | -310.9% | -0.167 | 0.69 | 2208 | 290.1 | -0.146 (1146) | -0.193 (1061) | -0.852
+donchian 5m      | -445.3% | -0.232 | 0.69 | 3709 | 362.7 | -0.186 (2344) | -0.317 (1528) | -1.220
+profitable after slippage: 6/30; mean return -76.8%
+
+=== 2. OUT-OF-SAMPLE: setups picked on older half (avgR>0.05, n>=15), tested on newer half ===
+  bb_rsi 30m       older 0.212 (43)  → newer -0.065 (28)
+  macd_adx 4h      older 0.108 (33)  → newer -0.300 (34)
+  weighted newer-half avgR of picked: -0.194
+
+=== 3. PORTFOLIOS ($100 split equally), whole year, slippage included ===
+all 15 HTF setups (1h/4h/1d) g65 r2          ret  -13.9%  $/day -0.038  med/day -0.103  +days 132/-226/0:7  best 4.48 worst -0.98  DD 16.2%  n 1925 avgR -0.022 PF 0.86 win 32%
+all 15 HTF setups (1h/4h/1d) g65 r2 BE       ret  -16.3%  $/day -0.045  med/day -0.107  +days 124/-232/0:9  best 5.16 worst -0.98  DD 17.3%  n 2005 avgR -0.027 PF 0.84 win 28%
+all 15 HTF setups (1h/4h/1d) g80 r2          ret  -15.4%  $/day -0.042  med/day -0.079  +days 133/-221/0:11  best 2.87 worst -0.88  DD 16.6%  n 1799 avgR -0.023 PF 0.84 win 32%
+all 15 HTF setups (1h/4h/1d) g65 r4          ret  -27.0%  $/day -0.074  med/day -0.150  +days 131/-227/0:7  best 3.74 worst -1.77  DD 28.6%  n 1926 avgR -0.021 PF 0.83 win 32%
+all 15 HTF setups (1h/4h/1d) g80 r4 BE       ret  -31.9%  $/day -0.087  med/day -0.160  +days 117/-235/0:13  best 5.17 worst -2.12  DD 32.9%  n 1873 avgR -0.032 PF 0.81 win 28%
+all 15 HTF setups (1h/4h/1d) g65 r6          ret  -36.5%  $/day -0.100  med/day -0.153  +days 126/-232/0:7  best 4.81 worst -2.34  DD 38.6%  n 1926 avgR -0.021 PF 0.82 win 32%
+
+older-half picks g65 r2                      ret   -4.4%  $/day -0.012  med/day  0.000  +days 42/-60/0:263  best 7.84 worst -3.85  DD 19.9%  n 138 avgR 0.005 PF 0.94 win 40%
+older-half picks g65 r2 BE                   ret   +1.9%  $/day  0.005  med/day  0.000  +days 39/-63/0:263  best 8.01 worst -3.18  DD 17.4%  n 141 avgR 0.044 PF 1.03 win 35%
+older-half picks g80 r2                      ret   -4.1%  $/day -0.011  med/day  0.000  +days 38/-58/0:269  best 7.84 worst -3.85  DD 19.5%  n 130 avgR -0.010 PF 0.94 win 39%
+older-half picks g65 r4                      ret   -6.6%  $/day -0.018  med/day  0.000  +days 42/-60/0:263  best 17.52 worst -7.87  DD 35.0%  n 138 avgR 0.005 PF 0.96 win 40%
+older-half picks g80 r4 BE                   ret   +8.8%  $/day  0.024  med/day  0.000  +days 35/-62/0:268  best 16.87 worst -7.71  DD 28.6%  n 132 avgR 0.035 PF 1.06 win 35%
+older-half picks g65 r6                      ret   +0.3%  $/day  0.001  med/day  0.000  +days 42/-60/0:263  best 27.34 worst -12.00  DD 44.5%  n 138 avgR 0.005 PF 1.00 win 40%
+
+top-5 in-sample (overfit ceiling) g65 r2     ret  +10.6%  $/day  0.029  med/day  0.000  +days 50/-105/0:210  best 7.25 worst -1.30  DD 12.1%  n 266 avgR 0.228 PF 1.20 win 36%
+top-5 in-sample (overfit ceiling) g65 r2 BE  ret   +9.7%  $/day  0.026  med/day  0.000  +days 52/-106/0:207  best 5.71 worst -1.32  DD 13.3%  n 279 avgR 0.161 PF 1.19 win 33%
+top-5 in-sample (overfit ceiling) g80 r2     ret   +8.6%  $/day  0.023  med/day  0.000  +days 48/-103/0:214  best 7.41 worst -1.33  DD 12.0%  n 261 avgR 0.206 PF 1.17 win 36%
+top-5 in-sample (overfit ceiling) g65 r4     ret  +15.4%  $/day  0.042  med/day  0.000  +days 50/-105/0:210  best 13.49 worst -2.89  DD 23.7%  n 266 avgR 0.228 PF 1.13 win 36%
+top-5 in-sample (overfit ceiling) g80 r4 BE  ret   +9.4%  $/day  0.026  med/day  0.000  +days 52/-104/0:209  best 10.69 worst -3.15  DD 25.5%  n 275 avgR 0.133 PF 1.08 win 32%
+top-5 in-sample (overfit ceiling) g65 r6     ret  +17.7%  $/day  0.048  med/day  0.000  +days 51/-104/0:210  best 17.09 worst -5.02  DD 32.5%  n 266 avgR 0.228 PF 1.10 win 36%
+
+=== 3b. Same portfolios, NEWER HALF only (out-of-sample for the picks) ===
+all 15 HTF setups g65 r2                     ret   -8.0%  $/day -0.043  med/day -0.105  +days 65/-114/0:4  best 5.19 worst -0.98  DD 9.2%  n 969 avgR -0.001 PF 0.85 win 31%
+all 15 HTF setups g65 r2 BE                  ret   -8.8%  $/day -0.048  med/day -0.120  +days 62/-116/0:5  best 5.24 worst -0.99  DD 9.4%  n 1012 avgR -0.015 PF 0.84 win 27%
+all 15 HTF setups g80 r2                     ret   -9.0%  $/day -0.049  med/day -0.085  +days 63/-114/0:6  best 3.92 worst -1.02  DD 9.6%  n 895 avgR -0.012 PF 0.82 win 31%
+all 15 HTF setups g65 r4                     ret  -18.2%  $/day -0.099  med/day -0.181  +days 61/-118/0:4  best 6.12 worst -1.75  DD 19.4%  n 969 avgR -0.001 PF 0.80 win 31%
+all 15 HTF setups g80 r4 BE                  ret  -21.7%  $/day -0.118  med/day -0.216  +days 55/-122/0:6  best 5.65 worst -1.76  DD 22.7%  n 933 avgR -0.031 PF 0.77 win 27%
+
+older-half picks g65 r2                      ret  -11.6%  $/day -0.064  med/day  0.000  +days 17/-32/0:134  best 2.30 worst -2.65  DD 11.8%  n 62 avgR -0.194 PF 0.62 win 34%
+older-half picks g65 r2 BE                   ret   -9.2%  $/day -0.050  med/day  0.000  +days 17/-33/0:133  best 2.34 worst -2.74  DD 9.4%  n 64 avgR -0.129 PF 0.70 win 33%
+older-half picks g80 r2                      ret  -11.6%  $/day -0.063  med/day  0.000  +days 14/-31/0:138  best 2.30 worst -2.67  DD 11.8%  n 56 avgR -0.269 PF 0.59 win 32%
+older-half picks g65 r4                      ret  -21.1%  $/day -0.115  med/day  0.000  +days 17/-32/0:134  best 4.42 worst -5.16  DD 21.4%  n 62 avgR -0.194 PF 0.63 win 34%
+older-half picks g80 r4 BE                   ret  -15.3%  $/day -0.083  med/day  0.000  +days 14/-32/0:137  best 4.56 worst -5.56  DD 15.3%  n 58 avgR -0.195 PF 0.71 win 31%
+
+=== 4. PER-SETUP (HTF only): gate 65 vs 80, BE on/off — whole-year return after slippage ===
+setup            | g65    | g65+BE | g80    | g80+BE | n65 | n80
+ema_trend 1h     | -62.6% | -67.4% | -65.7% | -61.0% | 306 | 273
+bb_rsi 1h        |  -2.5% |  -8.9% |  +1.0% |  -4.6% |  44 |  41
+donchian 1h      | -79.0% | -70.7% | -76.5% | -64.7% | 635 | 626
+macd_adx 1h      | -12.1% | -37.8% | -14.0% | -33.0% | 238 | 203
+supertrend 1h    | -23.1% | -23.5% | -44.5% | -48.2% | 267 | 246
+ema_trend 4h     | -14.5% |  -9.8% |  -9.0% |  +2.7% |  77 |  68
+bb_rsi 4h        |  -5.2% |  -5.2% |  -3.0% |  -3.0% |  11 |  10
+donchian 4h      | +20.1% | +13.5% | +22.0% | +15.3% | 159 | 158
+macd_adx 4h      | -21.7% | -18.7% | -20.5% | -16.0% |  67 |  61
+supertrend 4h    | -26.5% | -26.5% | -24.9% | -24.9% |  62 |  61
+ema_trend 1d     |  +3.5% |  -0.1% |  -1.9% |  -5.6% |  12 |  10
+bb_rsi 1d        |  +2.6% |  +2.6% |  +2.6% |  +2.6% |   1 |   1
+donchian 1d      | +13.8% |  +9.8% |  +7.9% |  +0.7% |  23 |  23
+macd_adx 1d      |  +1.0% |  +0.7% |  -0.4% |  -0.4% |  14 |  10
+supertrend 1d    |  -2.3% |  -2.3% |  -3.6% |  -3.6% |   9 |   8
+
+=== 5. EXIT REASONS, all 15 HTF setups, gate 65 ===
+  stop_loss      n  611  avgR -1.074  totalR -656.3
+  signal         n  208  avgR -0.366  totalR -76.2
+  take_profit    n  214  avgR 1.790  totalR 383.0
+  time_exit      n    3  avgR 0.785  totalR 2.4
+  trailing_stop  n  889  avgR 0.343  totalR 304.8
+
+=== 6. SIDE / SYMBOL, all 15 HTF setups, gate 65 ===
+  long       n  901  avgR -0.012
+  SOLUSDT    n  633  avgR -0.012
+  short      n 1024  avgR -0.031
+  ETHUSDT    n  645  avgR -0.025
+  BTCUSDT    n  647  avgR -0.029
+
+=== 7. older-half picks, g65, risk 4%: maxLev 20 vs 50 ===
+picks r4 lev20                               ret   -6.6%  $/day -0.018  med/day  0.000  +days 42/-60/0:263  best 17.52 worst -7.87  DD 35.0%  n 138 avgR 0.005 PF 0.96 win 40%
+picks r4 lev50                               ret  -12.2%  $/day -0.033  med/day  0.000  +days 42/-60/0:263  best 17.37 worst -8.28  DD 39.1%  n 138 avgR 0.005 PF 0.93 win 40%

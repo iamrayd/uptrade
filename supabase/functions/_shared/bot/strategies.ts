@@ -352,6 +352,88 @@ export const supertrendStrat: StrategyDef = {
   },
 };
 
+// ───────────────────────── v2: trailing exits ─────────────────────────
+//
+// A year replay with slippage (docs/strategies/V2-PLAN.md) showed where the two cross strategies
+// lose: the 208 trades closed by the opposite cross averaged −0.37R, while trades closed by a
+// trailing stop averaged +0.34R. The cross arrives after the move has already been given back.
+// The v2 variants keep the original trigger and initial stop, drop the opposite-cross exit and
+// the fixed 2R target, and trail a chandelier stop instead. They are new keys with their own
+// accounts: the originals keep running unchanged, so the two can be compared.
+
+/**
+ * `base` with a chandelier trailing stop as its only exit: the best price since entry minus
+ * `trailAtr` × ATR(`atr`). The engine only ever tightens a stop, so until the trail passes the
+ * initial stop the initial stop stands.
+ */
+export function withChandelier(
+  base: StrategyDef,
+  p: { atr: number; trailAtr: number },
+  meta: { key: string; name: string; version: number; summary: string; rules: string },
+): StrategyDef {
+  const params = Object.fromEntries(Object.entries(base.params).filter(([k]) => k !== "targetR"));
+  return {
+    ...base,
+    ...meta,
+    params: { ...params, trailAtr: p.trailAtr },
+    entry(c) {
+      const sig = base.entry(c);
+      if (!sig || "skip" in sig) return sig;
+      return { ...sig, takeProfit: null, reason: `${sig.reason} No fixed target: a ${p.trailAtr}×ATR chandelier stop trails the trade.` };
+    },
+    manage(c, tr): ManageResult {
+      if (tr.barsHeld < 1) return {};
+      const i = c.length - 1;
+      const a = atr(c, p.atr);
+      if (a[i] == null) return {};
+      const held = Math.min(tr.barsHeld, c.length);
+      const stop = tr.side === "long" ? highest(c, i, held) - p.trailAtr * a[i]! : lowest(c, i, held) + p.trailAtr * a[i]!;
+      return { stop, stopNote: `trail ${p.trailAtr}×ATR ${tr.side === "long" ? "below the highest high" : "above the lowest low"} since entry: ${px(stop)}` };
+    },
+  };
+}
+
+const TRAIL_ATR = 3;
+
+export const emaTrendV2 = withChandelier(emaTrend, { atr: EMA_P.atr, trailAtr: TRAIL_ATR }, {
+  key: "ema_trend_v2",
+  name: "EMA Trend Cross v2",
+  version: 2,
+  summary: `9/21 EMA crossover in the direction of the 200 EMA. 1.5×ATR stop, then a ${TRAIL_ATR}×ATR chandelier trail. No fixed target, no exit on the opposite cross.`,
+  rules: `**Idea.** The same entry as \`ema_trend\`, with the exit changed: let the trend run and leave on a trailing stop, not on the opposite cross.
+
+**Long entry** (all on the last closed bar)
+- EMA 9 crosses above EMA 21
+- Close is above EMA 200 (long-term uptrend)
+
+**Short entry** is the mirror image: EMA 9 crosses below EMA 21 with the close below EMA 200.
+
+**Risk**
+- Initial stop: 1.5 × ATR(14) from the entry price
+- Trailing stop: the highest high since entry minus ${TRAIL_ATR} × ATR(14) for a long (the lowest low plus ${TRAIL_ATR} × ATR for a short), moved only in the trade's favour at each bar close
+- *Modification (v2):* no fixed 2R target and no exit on the opposite EMA cross. On a year of history with slippage, trades closed by the opposite cross averaged −0.37R, trades closed by a trailing stop +0.34R.`,
+});
+
+export const macdAdxV2 = withChandelier(macdAdx, { atr: MA_P.atr, trailAtr: TRAIL_ATR }, {
+  key: "macd_adx_v2",
+  name: "MACD Momentum + ADX v2",
+  version: 2,
+  summary: `MACD/signal cross when ADX > 25 and the DMI agrees. 1.5×ATR stop, then a ${TRAIL_ATR}×ATR chandelier trail. No fixed target, no exit on the opposite cross.`,
+  rules: `**Idea.** The same entry as \`macd_adx\`, with the exit changed: let the trend run and leave on a trailing stop, not on the opposite cross.
+
+**Long entry**
+- MACD (12, 26) crosses above its 9-period signal line
+- ADX(14) ≥ 25 (trending market)
+- +DI > −DI (the trend is up)
+
+**Short entry** is the mirror image: MACD crosses below the signal line, ADX ≥ 25, and −DI > +DI.
+
+**Risk**
+- Initial stop: 1.5 × ATR(14)
+- Trailing stop: the highest high since entry minus ${TRAIL_ATR} × ATR(14) for a long (the lowest low plus ${TRAIL_ATR} × ATR for a short), moved only in the trade's favour at each bar close
+- *Modification (v2):* no fixed 2R target and no exit on the opposite MACD cross. On a year of history with slippage, trades closed by the opposite cross averaged −0.37R, trades closed by a trailing stop +0.34R.`,
+});
+
 // ───────────────────────── "+ News" twins ─────────────────────────
 
 /**
@@ -387,6 +469,8 @@ export const STRATEGIES: StrategyDef[] = [
   donchian,
   macdAdx,
   supertrendStrat,
+  emaTrendV2,
+  macdAdxV2,
   ...[emaTrend, bbRsi, donchian, macdAdx, supertrendStrat].filter((s) => NEWS_TWINS.includes(s.key)).map(withNews),
 ];
 export const STRATEGY_BY_KEY: Record<string, StrategyDef> = Object.fromEntries(STRATEGIES.map((s) => [s.key, s]));

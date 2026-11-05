@@ -98,7 +98,7 @@ create table if not exists public.bot_events (
   trade_id    uuid references public.bot_trades on delete cascade,
   symbol      text,
   timeframe   text,
-  kind        text not null,       -- opened | closed | skipped | stop_moved | missed_bar | error
+  kind        text not null,       -- placed | opened | closed | skipped | stop_moved | missed_bar | error
   message     text not null,
   data        jsonb not null default '{}',
   created_at  timestamptz not null default now()
@@ -182,7 +182,7 @@ create index if not exists bot_filtered_user_idx on public.bot_filtered_signals 
 
 -- Every signal a bot did not trade is kept and replayed, not only the ones a lesson blocked: they are the
 -- data a busted or heavily filtered bot keeps learning from.
--- reason = lesson | confluence | cooldown | news | busted | probation | min_stop.
+-- reason = lesson | confluence | cooldown | news | busted | probation | min_stop | unfilled.
 alter table public.bot_filtered_signals add column if not exists reason text not null default 'lesson';
 create index if not exists bot_filtered_resolved_idx on public.bot_filtered_signals (resolved_at desc) where resolved_at is not null;
 -- The replay's R with the breakeven-stop variant (stop to fee cover at +1R), next to the plain outcome_r,
@@ -212,6 +212,35 @@ alter table public.bot_accounts add column if not exists verdict text;
 -- Seed probation for the short timeframes (one-time: only rows that have never been tuned).
 update public.bot_accounts set probation = true, probation_changed_at = now()
  where timeframe in ('5m','15m','30m') and probation = false and probation_changed_at is null;
+
+-- Retired setups (tuning.ts RETIRED): the year replay with slippage showed them losing in both halves of
+-- the year, so they are held on probation whatever their replays say. The engine enforces this in code
+-- (isRetired); this one-time update only makes the flag visible on the dashboard before the next analysis run.
+update public.bot_accounts set probation = true, probation_changed_at = now()
+ where probation = false
+   and (regexp_replace(strategy, '_news$', ''), timeframe) in
+       (('ema_trend','1h'), ('donchian','1h'), ('supertrend','1h'), ('macd_adx','4h'), ('supertrend','4h'));
+
+-- Maker entries: an entry is a limit order resting at the signal bar's close (risk.ts ENTRY). It lives here
+-- until a 1-minute candle trades through it (then it becomes a bot_trades row, with no entry fee) or it
+-- lapses at expires_at (then it is kept as a shadow signal, reason 'unfilled').
+create table if not exists public.bot_pending_entries (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid not null references auth.users on delete cascade,
+  account_id   uuid not null references public.bot_accounts on delete cascade,
+  timeframe    text not null,
+  symbol       text not null,
+  side         text not null check (side in ('long', 'short')),
+  limit_price  numeric(28,10) not null check (limit_price > 0),
+  placed_at    timestamptz not null,
+  expires_at   timestamptz not null,
+  payload      jsonb not null,               -- the bot_open_trade argument, used as is when the order fills
+  features     jsonb not null default '{}',  -- entry features, for the shadow signal if it lapses
+  unique (account_id, symbol)
+);
+alter table public.bot_pending_entries enable row level security;
+drop policy if exists "read own pending entries" on public.bot_pending_entries;
+create policy "read own pending entries" on public.bot_pending_entries for select to authenticated using (user_id = auth.uid());
 
 -- Latest crypto-news read (one row), written every few minutes by the bot-news function.
 create table if not exists public.bot_news (
@@ -346,6 +375,8 @@ returns jsonb language sql stable set search_path = public as $$
       from public.bot_accounts a left join public.bot_settings s on s.user_id = a.user_id), '[]'),
     'open_trades', coalesce((
       select jsonb_agg(to_jsonb(t)) from public.bot_trades t where t.status = 'open'), '[]'),
+    'pending_entries', coalesce((
+      select jsonb_agg(to_jsonb(e) order by e.placed_at) from public.bot_pending_entries e), '[]'),
     'cursors', coalesce((select jsonb_object_agg(key, bar_time) from public.bot_cursors), '{}'),
     'lessons', coalesce((
       select jsonb_agg(jsonb_build_object(
@@ -362,7 +393,36 @@ returns void language sql set search_path = public as $$
   on conflict (key) do update set bar_time = greatest(public.bot_cursors.bar_time, excluded.bar_time);
 $$;
 
--- Opens a trade at market (taker fee). Returns {trade, balance}.
+-- Rests an entry limit order: {account_id, placed_at, expires_at, features, payload: <bot_open_trade argument>}.
+create or replace function public.bot_place_entry(p jsonb)
+returns void language plpgsql set search_path = public as $$
+declare
+  v_acc  public.bot_accounts;
+  v_o    jsonb := p->'payload';
+begin
+  select * into v_acc from public.bot_accounts where id = (p->>'account_id')::uuid;
+  if not found then raise exception 'bot account not found'; end if;
+  if v_acc.status <> 'active' then raise exception 'bot account is %', v_acc.status; end if;
+
+  insert into public.bot_pending_entries (user_id, account_id, timeframe, symbol, side, limit_price, placed_at, expires_at, payload, features)
+  values (v_acc.user_id, v_acc.id, v_acc.timeframe, upper(v_o->>'symbol'), v_o->>'side', (v_o->>'entry_price')::numeric,
+          (p->>'placed_at')::timestamptz, (p->>'expires_at')::timestamptz, v_o, coalesce(p->'features', '{}'));
+
+  insert into public.bot_events (user_id, account_id, symbol, timeframe, kind, message, data)
+  values (v_acc.user_id, v_acc.id, upper(v_o->>'symbol'), v_acc.timeframe, 'placed',
+          initcap(v_o->>'side') || ' limit ' || upper(v_o->>'symbol') || ' @ ' || trim_scale((v_o->>'entry_price')::numeric)::text ||
+          ', good until ' || to_char((p->>'expires_at')::timestamptz at time zone 'utc', 'HH24:MI') || ' UTC — ' || (v_o->>'entry_reason'),
+          jsonb_build_object('qty', v_o->'qty', 'stop', v_o->'stop_price', 'take_profit', v_o->'take_profit', 'expires_at', p->'expires_at'));
+end $$;
+
+-- Removes resting entry orders (filled ones are removed by bot_open_trade itself).
+create or replace function public.bot_cancel_entries(p_ids uuid[])
+returns void language sql set search_path = public as $$
+  delete from public.bot_pending_entries where id = any(p_ids);
+$$;
+
+-- Opens a trade. The entry fee is taker (a market order) unless entry_fee_rate says otherwise (0 for a
+-- filled limit order, whose pending_id row is removed in the same transaction). Returns {trade, balance}.
 create or replace function public.bot_open_trade(p jsonb)
 returns jsonb language plpgsql set search_path = public as $$
 declare
@@ -392,8 +452,14 @@ begin
   end if;
 
   v_margin := v_qty * v_price / v_lev;
-  v_fee    := v_qty * v_price * public._taker_fee();
+  v_fee    := v_qty * v_price * coalesce((p->>'entry_fee_rate')::numeric, public._taker_fee());
+  if v_fee < 0 then raise exception 'invalid entry fee'; end if;
   if v_acc.balance < v_margin + v_fee then raise exception 'insufficient balance'; end if;
+  -- An order fills once: if another run already filled or cancelled it, refuse (the raise undoes nothing, as nothing was written yet).
+  if p ? 'pending_id' then
+    delete from public.bot_pending_entries where id = (p->>'pending_id')::uuid;
+    if not found then raise exception 'entry order no longer resting'; end if;
+  end if;
 
   insert into public.bot_trades (
     user_id, account_id, strategy, timeframe, symbol, side, qty, entry_price, leverage, margin, liq_price,
@@ -678,7 +744,7 @@ declare f text;
 begin
   foreach f in array array[
     'bot_lock(int)', 'bot_unlock(text, jsonb)', 'bot_sync(jsonb, text[])', 'bot_get_state()',
-    'bot_set_cursor(text, timestamptz)', 'bot_open_trade(jsonb)',
+    'bot_set_cursor(text, timestamptz)', 'bot_open_trade(jsonb)', 'bot_place_entry(jsonb)', 'bot_cancel_entries(uuid[])',
     'bot_close_trade(uuid, numeric, text, numeric, timestamptz, text)', 'bot_update_trades(jsonb)', 'bot_log(jsonb)',
     'bot_log_filtered(jsonb)', 'bot_analysis_state()', 'bot_save_reviews(jsonb)', 'bot_resolve_signals(jsonb)',
     'bot_save_lessons(jsonb)', 'bot_save_report(jsonb)', 'bot_save_news(jsonb)', 'bot_tune_accounts(jsonb)'

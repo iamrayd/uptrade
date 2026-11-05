@@ -1,4 +1,5 @@
-import type { Candle, ExitReason, Side } from "./types.ts";
+import type { Candle, ExitReason, Side, Timeframe } from "./types.ts";
+import { TF_SECONDS } from "./types.ts";
 
 // Same numbers as the UpTrade engine (supabase/schema.sql, src/lib/pnl.ts).
 export const MMR = 0.005;
@@ -65,8 +66,11 @@ export function sizePosition(a: {
   freeBalance: number;
   stepSize: number;
   settings: RiskSettings;
+  /** Fee on the entry fill: taker for a market order (the default), MAKER_FEE for a resting limit. */
+  entryFeeRate?: number;
 }): SizedOrder | { skip: string } {
   const { side, entry, stop, equity, freeBalance, stepSize, settings } = a;
+  const entryFeeRate = a.entryFeeRate ?? TAKER_FEE;
   const dist = side === "long" ? entry - stop : stop - entry;
   if (!(dist > 0)) return { skip: `Stop ${stop} is on the wrong side of the entry ${entry}.` };
   const stopPct = dist / entry;
@@ -75,8 +79,8 @@ export function sizePosition(a: {
 
   const notes: string[] = [];
   const riskBudget = equity * settings.riskPct;
-  // Per unit: the price move to the stop + taker fee on entry + taker fee on the stop fill.
-  const perUnit = dist + entry * TAKER_FEE + stop * TAKER_FEE;
+  // Per unit: the price move to the stop + the entry fee + taker fee on the stop fill.
+  const perUnit = dist + entry * entryFeeRate + stop * TAKER_FEE;
   let qty = floorToStep(riskBudget / perUnit, stepSize);
 
   // Highest leverage whose liquidation price stays LIQ_BUFFER × stop distance past entry.
@@ -91,11 +95,11 @@ export function sizePosition(a: {
 
   // Margin budget: an equal share of equity per slot, and never more than the free balance.
   const marginBudget = Math.min(equity / settings.slots, freeBalance);
-  const feeReserve = (n: number) => n * TAKER_FEE;
+  const feeReserve = (n: number) => n * entryFeeRate;
   let leverage = Math.max(1, Math.ceil((qty * entry) / Math.max(marginBudget - feeReserve(qty * entry), 1e-9)));
   if (leverage > levCap) {
     leverage = levCap;
-    const maxNotional = (marginBudget * leverage) / (1 + leverage * TAKER_FEE);
+    const maxNotional = (marginBudget * leverage) / (1 + leverage * entryFeeRate);
     const capped = floorToStep(maxNotional / entry, stepSize);
     if (capped < qty) {
       notes.push(`Size cut from ${qty} to ${capped}: at ${leverage}x the $${marginBudget.toFixed(2)} margin budget can't carry the full ${(settings.riskPct * 100).toFixed(1)}% risk.`);
@@ -106,7 +110,7 @@ export function sizePosition(a: {
   const notional = qty * entry;
   if (notional < MIN_NOTIONAL) return { skip: `Position would be only $${notional.toFixed(2)} notional (min $${MIN_NOTIONAL}).` };
   const margin = notional / leverage;
-  const entryFee = notional * TAKER_FEE;
+  const entryFee = notional * entryFeeRate;
   if (margin + entryFee > freeBalance + 1e-9) return { skip: `Not enough free balance ($${freeBalance.toFixed(2)}) for $${margin.toFixed(2)} margin.` };
 
   const riskUsd = qty * perUnit;
@@ -122,6 +126,39 @@ export function sizePosition(a: {
     stopPct,
     notes,
   };
+}
+
+// ───────────────────────── Maker entries ─────────────────────────
+// An entry can be a limit order resting at the signal bar's close instead of a market order: no
+// taker fee and no slippage on the way in. The price paid for that is the entries that never
+// fill, which are the ones that ran away at once.
+//
+// It is built and tested but OFF by default. Replayed on a year of 1-minute candles with the
+// live fill rules (scripts/experiments/v2-validate.ts, FINE=1m), the two cancel out: 16 setups
+// made +98.5R with market entries at 0.05% slippage and +87.9R with maker entries (92% of the
+// orders filled). No measured gain, so the simpler behaviour stays. Maker entries win only if
+// real slippage is well above 0.05% per side.
+
+export const ENTRY = {
+  /** Enter with a resting limit at the signal close. False: market orders. */
+  maker: false,
+  /** The order lapses after this share of the bar, within the bounds below. */
+  timeoutBarShare: 0.25,
+  timeoutMinMs: 2 * 60_000,
+  timeoutMaxMs: 60 * 60_000,
+};
+
+/** How long a resting entry waits before it is cancelled. */
+export function makerTimeoutMs(tf: Timeframe) {
+  return Math.min(ENTRY.timeoutMaxMs, Math.max(ENTRY.timeoutMinMs, ENTRY.timeoutBarShare * TF_SECONDS[tf] * 1000));
+}
+
+/**
+ * True when the candle traded THROUGH the limit. A touch is not counted: at the touch the
+ * order may still be queued behind others, and counting it would flatter the fill rate.
+ */
+export function limitFilled(side: Side, limit: number, c: Candle) {
+  return side === "long" ? c.low < limit : c.high > limit;
 }
 
 export interface LiveTrade {

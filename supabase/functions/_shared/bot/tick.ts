@@ -1,15 +1,20 @@
 import type { Candle, Timeframe } from "./types.ts";
 import { SYMBOLS, TF_SECONDS, TIMEFRAMES } from "./types.ts";
 import { STRATEGIES, STRATEGY_BY_KEY } from "./strategies.ts";
-import { breakevenStop, checkExit, reachedR, roundStop, sizePosition, TAKER_FEE, tighterStop, toTick } from "./risk.ts";
+import { breakevenStop, checkExit, ENTRY, limitFilled, MAKER_FEE, makerTimeoutMs, reachedR, roundStop, sizePosition, TAKER_FEE, tighterStop, toTick } from "./risk.ts";
 import { entryFeatures, ruleBlocks } from "./analysis.ts";
 import { CONFLUENCE, confluence, passesGate } from "./confluence.ts";
 import { convictionMult, cooldownUntil, riskMultiplier } from "./discipline.ts";
+import { isRetired } from "./tuning.ts";
 import { newsFor, newsGate, newsReadings } from "./news.ts";
-import type { AccountRow, Db, EventRow, FilteredSignalInput, LessonRow, Market, SkipReason, SymbolFilters, TradeRow, TradeUpdate } from "./io.ts";
+import type { AccountRow, Db, EventRow, FilteredSignalInput, LessonRow, Market, OpenTradeInput, PendingEntryRow, SkipReason, SymbolFilters, TradeRow, TradeUpdate } from "./io.ts";
 
 // One bot run. Called every minute by pg_cron → bot-tick edge function.
 //
+//  0. Resting entry orders (only with maker entries on, risk.ts ENTRY; off by default): an
+//     entry is then a limit order at the signal bar's close (maker fee). Each one is checked against the closed 1-minute candles since it was
+//     placed: the first candle that trades through the limit fills it; if none does before
+//     it expires, it is cancelled and kept as an "unfilled" shadow signal.
 //  1. Stops & targets: replay the closed 1-minute candles since each open
 //     trade was last checked, and fill stops, targets and liquidations in time order.
 //  2. Bar closes: for every timeframe whose bar just closed, each strategy
@@ -18,9 +23,10 @@ import type { AccountRow, Db, EventRow, FilteredSignalInput, LessonRow, Market, 
 //       - the confluence gate (most confirming indicators must agree, confluence.ts),
 //       - the news gate ("+ News" variants only, news.ts),
 //       - the cooldown after a loss (discipline.ts),
-//       - the active lessons learned from past losers (analysis.ts).
+//       - the active lessons learned from past losers (analysis.ts),
+//       - probation (shadow-only setups, including the retired ones: tuning.ts).
 //     It is then sized with risk scaled down while the account is losing, and fills at
-//     the current price.
+//     the current price (or, with maker entries on, rests as a limit order for step 0).
 //
 // A signal that is not traded is never thrown away: it is stored with the reason and
 // replayed later by bot-analyze, so a busted or heavily filtered bot keeps learning.
@@ -38,6 +44,8 @@ const KLINE_LIMIT = 600;
 export interface TickSummary {
   skipped?: string;
   opened: number;
+  /** Entry limit orders placed this run (maker entries). They count as opened when they fill. */
+  entriesPlaced: number;
   closed: number;
   stopMoves: number;
   signalsSkipped: number;
@@ -63,14 +71,17 @@ export async function runTick({
   db,
   now = Date.now,
   minConfluence = CONFLUENCE.minScore,
+  makerEntries = ENTRY.maker,
 }: {
   market: Market;
   db: Db;
   now?: () => number;
   /** Entries scoring below this (0–100) are not traded. Tests lower it to 0 to exercise the rest of the engine. */
   minConfluence?: number;
+  /** Enter with a resting limit at the signal close instead of a market order (default: ENTRY.maker, off). */
+  makerEntries?: boolean;
 }): Promise<TickSummary> {
-  const summary: TickSummary = { opened: 0, closed: 0, stopMoves: 0, signalsSkipped: 0, signalsFiltered: 0, filteredByReason: {}, barsEvaluated: 0, errors: [] };
+  const summary: TickSummary = { opened: 0, entriesPlaced: 0, closed: 0, stopMoves: 0, signalsSkipped: 0, signalsFiltered: 0, filteredByReason: {}, barsEvaluated: 0, errors: [] };
   if (!(await db.lock(LOCK_TTL_SECONDS))) return { ...summary, skipped: "another run holds the lock" };
 
   const events: EventRow[] = [];
@@ -106,14 +117,114 @@ export async function runTick({
     const news = state.news ?? null;
     const accById = new Map(accounts.map((a) => [a.id, a]));
     const open: TradeRow[] = state.open_trades.map(numTrade);
+    const pending: PendingEntryRow[] = (state.pending_entries ?? []).map((p) => ({ ...p, limit_price: +p.limit_price }));
     const cursors = state.cursors;
     const lessons: LessonRow[] = state.lessons ?? [];
     let filters: Record<string, SymbolFilters> | null = null; // qty step / price tick, fetched when first needed
     const getFilters = async (symbol: string) => (filters ??= await market.symbolFilters(SYMBOLS))[symbol] ?? { step: 0.00001, tick: 0.01 };
     if (!accounts.length) return { ...summary, skipped: "no bot accounts (enable bots in the app)" };
 
-    // ── 1. Stops, targets, liquidations on 1-minute candles ──
     const lastClosedMinute = Math.floor(now() / 60_000) * 60_000 - 60_000;
+
+    // ── 0. Resting entry orders: fill or lapse, on 1-minute candles ──
+    // An order can only be filled by a candle that started after it was placed.
+    const firstMinute = (p: PendingEntryRow) => Math.ceil(ms(p.placed_at) / 60_000) * 60_000;
+    for (const symbol of SYMBOLS) {
+      const resting = pending.filter((p) => p.symbol === symbol);
+      if (!resting.length) continue;
+      try {
+        const from = Math.min(...resting.map(firstMinute));
+        const candles = from <= lastClosedMinute ? (await market.klines(symbol, "1m", { startTime: from, limit: 1000 })).filter((c) => c.time * 1000 <= lastClosedMinute) : [];
+        for (const p of resting) {
+          const expires = ms(p.expires_at);
+          const acc = accById.get(p.account_id);
+          const base = { user_id: p.user_id, account_id: p.account_id, symbol, timeframe: p.timeframe };
+          const drop = () => pending.splice(pending.indexOf(p), 1);
+          /** Keeps the cancelled order as a shadow signal, so the analyzer replays what the entry would have made. */
+          const shadowOrder = (reason: SkipReason, message: string) => {
+            summary.signalsFiltered++;
+            summary.filteredByReason[reason] = (summary.filteredByReason[reason] ?? 0) + 1;
+            filtered.push({
+              account_id: p.account_id,
+              reason,
+              lesson_ids: [],
+              symbol,
+              side: p.side,
+              entry_price: p.limit_price,
+              stop_price: p.payload.stop_price,
+              take_profit: p.payload.take_profit,
+              signal_bar_time: p.payload.signal_bar_time,
+              features: p.features,
+            });
+            events.push({ ...base, kind: "skipped", message, data: { reason } });
+          };
+          const dir = p.side === "long" ? "Long" : "Short";
+          // The order must still be wanted: the owner may have switched the bots off, or the setup may have
+          // gone on probation, since it was placed.
+          if (acc && !acc.enabled) {
+            await db.cancelEntries([p.id]);
+            summary.signalsSkipped++;
+            events.push({ ...base, kind: "skipped", message: `${dir} limit order at ${fmt(p.limit_price)} cancelled: the bots were switched off.` });
+            drop();
+            continue;
+          }
+          if (acc && (acc.probation || isRetired(acc.strategy, acc.timeframe))) {
+            await db.cancelEntries([p.id]);
+            shadowOrder("probation", `${dir} limit order at ${fmt(p.limit_price)} cancelled: the setup went on probation (shadow-only).`);
+            drop();
+            continue;
+          }
+          const fill = candles.find((c) => c.time * 1000 >= firstMinute(p) && c.time * 1000 < expires && limitFilled(p.side, p.limit_price, c));
+          if (fill) {
+            try {
+              const res = await db.openTrade({
+                ...p.payload,
+                opened_at: iso(Math.min(fill.time * 1000 + 59_000, now())),
+                entry_fee_rate: MAKER_FEE,
+                pending_id: p.id,
+                sizing_notes: [
+                  ...p.payload.sizing_notes,
+                  `Entered with a limit order at ${fmt(p.limit_price)} (maker, no entry fee), placed ${iso(ms(p.placed_at))}. Filled by the 1m candle ${iso(fill.time * 1000)}: O ${fmt(fill.open)} H ${fmt(fill.high)} L ${fmt(fill.low)} C ${fmt(fill.close)}.`,
+                ],
+              });
+              if (acc) acc.balance = +res.balance;
+              open.push(numTrade(res.trade));
+              summary.opened++;
+            } catch (e) {
+              const why = e instanceof Error ? e.message : String(e);
+              if (/no longer resting/.test(why)) {
+                // Another run already filled or cancelled it. Nothing to do.
+              } else if (/bot account is|insufficient balance|wrong side of entry|duplicate|unique/.test(why)) {
+                // The account can no longer carry the order: busted since, its balance went elsewhere, or it
+                // already holds this coin. Kept as a shadow signal like any other signal that is not traded.
+                await db.cancelEntries([p.id]);
+                shadowOrder(/bot account is/.test(why) ? "busted" : "min_stop", `${dir} limit order at ${fmt(p.limit_price)} was reached but could not be opened: ${why}`);
+              } else {
+                // Anything else (a network or database hiccup) may pass: the order stays resting for the next run.
+                recordError(e, `fill entry order ${symbol}`, base);
+                continue;
+              }
+            }
+            drop();
+          } else if (lastClosedMinute + 60_000 >= expires) {
+            // Every candle it could have filled on has closed. Lapse only once the exchange has published
+            // the last of them (or an hour has passed, so a gap in the data cannot hold the order forever).
+            const lastEligible = Math.ceil(expires / 60_000) * 60_000 - 60_000;
+            const seen = candles.length ? candles[candles.length - 1].time * 1000 : 0;
+            if (lastEligible >= firstMinute(p) && seen < lastEligible && now() < expires + 3_600_000) continue;
+            await db.cancelEntries([p.id]);
+            const waited = Math.round((expires - ms(p.placed_at)) / 60_000);
+            shadowOrder("unfilled", `${dir} signal not taken: the limit order at ${fmt(p.limit_price)} was not filled within ${waited} min, so it was cancelled.`);
+            drop();
+          }
+        }
+      } catch (e) {
+        recordError(e, `entry orders ${symbol}`, { symbol });
+      }
+    }
+    await flush();
+
+    // ── 1. Stops, targets, liquidations on 1-minute candles ──
     for (const symbol of SYMBOLS) {
       const trades = () => open.filter((t) => t.symbol === symbol);
       if (!trades().length) continue;
@@ -262,6 +373,7 @@ export async function runTick({
       }
 
       if (!acc.enabled) return;
+      if (pending.some((p) => p.account_id === acc.id && p.symbol === symbol)) return; // an entry order is still resting here
       const sig = strat.entry(closed);
       if (!sig) return;
       if ("skip" in sig) {
@@ -277,18 +389,22 @@ export async function runTick({
       const f = await getFilters(symbol);
       sig.stop = roundStop(sig.side, sig.stop, f.tick);
       if (sig.takeProfit != null) sig.takeProfit = toTick(sig.takeProfit, f.tick, "nearest");
+      // A maker entry rests at the signal bar's close, or at the current price when that is already
+      // better: the order must never be marketable, or it would fill as a taker.
+      const entryPx = !makerEntries ? price : sig.side === "long" ? Math.min(signalBar.close, price) : Math.max(signalBar.close, price);
       if (sig.side === "long" ? sig.stop >= price : sig.stop <= price) return skip(`price ${fmt(price)} already moved through the stop ${fmt(sig.stop)}.`);
+      if (sig.side === "long" ? sig.stop >= entryPx : sig.stop <= entryPx) return skip(`the stop ${fmt(sig.stop)} is on the wrong side of the entry ${fmt(entryPx)}.`);
       if (sig.takeProfit != null && (sig.side === "long" ? price >= sig.takeProfit : price <= sig.takeProfit))
         return skip(`price ${fmt(price)} already reached the target ${fmt(sig.takeProfit)}.`);
 
       // What the market says besides the strategy's own trigger. The readings are stored with the
       // trade (and with a skipped signal), so the learner can test whether they matter.
-      const cf = confluence({ strategy: acc.strategy, timeframe: tf, side: sig.side, candles: closed, entry: price, stop: sig.stop });
+      const cf = confluence({ strategy: acc.strategy, timeframe: tf, side: sig.side, candles: closed, entry: entryPx, stop: sig.stop });
       const nr = newsFor(news, symbol, at);
       // The threshold this setup is judged against: its own learned bar, or the global default.
       const minCf = acc.min_confluence ?? minConfluence;
       sig.indicators = { ...sig.indicators, ...cf.readings, cfMin: minCf, ...newsReadings(nr) };
-      const features = entryFeatures({ side: sig.side, entry: price, stop: sig.stop, symbol, at, indicators: sig.indicators, strategy: acc.strategy });
+      const features = entryFeatures({ side: sig.side, entry: entryPx, stop: sig.stop, symbol, at, indicators: sig.indicators, strategy: acc.strategy });
 
       // A signal that is not traded is kept, with the reason, for bot-analyze to replay.
       const shadow = (reason: SkipReason, why: string, lessonIds: string[] = []) => {
@@ -300,7 +416,7 @@ export async function runTick({
           lesson_ids: lessonIds,
           symbol,
           side: sig.side,
-          entry_price: price,
+          entry_price: entryPx,
           stop_price: sig.stop,
           take_profit: sig.takeProfit,
           signal_bar_time: iso(signalBar.time * 1000),
@@ -317,7 +433,7 @@ export async function runTick({
         if (g.block) return shadow("news", g.reason);
         newsNote = ` ${g.reason}`;
       }
-      const cool = cooldownUntil(acc.recent, symbol, TF_SECONDS[tf] * 1000);
+      const cool = cooldownUntil(acc.recent, symbol, TF_SECONDS[tf] * 1000, tf);
       if (cool && cool.until > at) return shadow("cooldown", `cooling down after ${cool.why} (until ${iso(cool.until)}).`);
 
       // Lessons learned from past losers (see analysis.ts). The blocked signal is replayed later
@@ -330,6 +446,8 @@ export async function runTick({
 
       // Probation runs after the other gates, so its replays measure the entries that would
       // really have been traded. The setup keeps learning at zero capital until promoted.
+      // Retired setups are held there by the code, whatever the stored flag says (tuning.ts RETIRED).
+      if (isRetired(acc.strategy, tf)) return shadow("probation", "the setup is retired (shadow-only: a year of history showed it losing after costs).");
       if (acc.probation) return shadow("probation", "the setup is on probation (shadow-only until its replayed entries prove an edge).");
 
       // Conviction-weighted sizing (per-setup flag; the analyzer reverts it if it costs money).
@@ -338,16 +456,17 @@ export async function runTick({
 
       const margins = open.filter((x) => x.account_id === acc.id).reduce((s, x) => s + x.margin, 0);
       const equity = acc.balance + margins;
-      const risk = riskMultiplier({ equity, startBalance: acc.start_balance, recent: acc.recent });
+      const risk = riskMultiplier({ equity, startBalance: acc.start_balance, recent: acc.recent, timeframe: tf });
       const riskPct = acc.risk_pct * risk.mult * conv.mult;
       const sized = sizePosition({
         side: sig.side,
-        entry: price,
+        entry: entryPx,
         stop: sig.stop,
         equity,
         freeBalance: acc.balance,
         stepSize: f.step,
         settings: { riskPct, maxLeverage: acc.max_leverage, slots: SYMBOLS.length },
+        entryFeeRate: makerEntries ? MAKER_FEE : TAKER_FEE,
       });
       // Sizing and minimum-stop rejections are kept as shadow signals too: the learner replays
       // them, so the 0.4% minimum stop and the sizing caps are judged on data, not assumed.
@@ -360,12 +479,12 @@ export async function runTick({
         `Leverage ${sized.leverage}x: the lowest that fits the $${Math.min(equity / SYMBOLS.length, acc.balance).toFixed(2)} margin budget (equity ÷ ${SYMBOLS.length} coins). Liquidation at ${fmt(sized.liqPrice)}, beyond the stop.`,
         ...sized.notes,
       ];
-      const res = await db.openTrade({
+      const order: OpenTradeInput = {
         account_id: acc.id,
         symbol,
         side: sig.side,
         qty: sized.qty,
-        entry_price: price,
+        entry_price: entryPx,
         leverage: sized.leverage,
         stop_price: sig.stop,
         take_profit: sig.takeProfit,
@@ -376,7 +495,17 @@ export async function runTick({
         entry_reason: `${sig.reason} ${cf.summary}${newsNote}`,
         entry_indicators: sig.indicators,
         sizing_notes: notes,
-      });
+      };
+      if (makerEntries) {
+        // The order rests until a 1m candle trades through it (step 0 of the next runs) or it expires.
+        const expires = at + makerTimeoutMs(tf);
+        const entry = { account_id: acc.id, placed_at: iso(at), expires_at: iso(expires), features, payload: { ...order, entry_fee_rate: MAKER_FEE } };
+        await db.placeEntry(entry);
+        pending.push({ ...entry, id: "", user_id: acc.user_id, timeframe: tf, symbol, side: sig.side, limit_price: entryPx });
+        summary.entriesPlaced++;
+        return;
+      }
+      const res = await db.openTrade(order);
       acc.balance = +res.balance;
       open.push(numTrade(res.trade));
       summary.opened++;
