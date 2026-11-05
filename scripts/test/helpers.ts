@@ -147,6 +147,8 @@ export function pgDb(pg: PGlite): Db {
     getState: () => call("select public.bot_get_state() r", []),
     setCursor: async (k, t) => void (await call("select public.bot_set_cursor($1, $2::timestamptz) r", [k, t])),
     openTrade: (p) => call("select public.bot_open_trade($1::jsonb) r", [j(p)]),
+    placeEntry: async (p) => void (await call("select public.bot_place_entry($1::jsonb) r", [j(p)])),
+    cancelEntries: async (ids) => void (ids.length && (await call("select public.bot_cancel_entries($1::uuid[]) r", [ids]))),
     closeTrade: (a) =>
       call("select public.bot_close_trade($1::uuid, $2::numeric, $3, $4::numeric, $5::timestamptz, $6) r", [a.id, a.price, a.reason, a.feeRate, a.at, a.note]),
     updateTrades: async (u) => void (u.length && (await call("select public.bot_update_trades($1::jsonb) r", [j(u)]))),

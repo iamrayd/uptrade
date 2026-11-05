@@ -6,6 +6,7 @@ import { CONFLUENCE } from "./confluence.ts";
 //  - Probation: a setup trades shadow-only (zero capital) until its replayed signals prove
 //    an edge after slippage. New 5m/15m/30m setups start on probation (EVIDENCE.md: they
 //    lose money after slippage); a setup whose verdict turns "avoid" goes back on it.
+//    Retired setups (RETIRED) are held on probation and never promoted.
 //  - Per-setup confluence threshold: swept over {65,70,75,80} on the setup's own entries
 //    (trades plus replayed signals); a higher bar is adopted only when it improves BOTH
 //    halves of the data and does not skip more than the 60% room rule allows.
@@ -35,6 +36,22 @@ export const TUNE = {
   beRetireWindow: 30,
 };
 
+/**
+ * Setups that get no capital, whatever their replays say (docs/strategies/V2-PLAN.md). A year
+ * replay of the live configuration with 0.05% slippage per side: every 5m/15m/30m setup lost,
+ * and the five named setups lost in BOTH halves of the year. They stay on probation, so their
+ * signals are still logged and replayed, and the list is the only way back: take a setup off it
+ * when a fresh replay shows an edge. News twins share their original's trigger and exits, so
+ * they are retired with it. A new rule set (a `_v2` key) starts with a clean record.
+ */
+export const RETIRED = {
+  timeframes: ["5m", "15m", "30m"],
+  setups: ["ema_trend 1h", "donchian 1h", "supertrend 1h", "macd_adx 4h", "supertrend 4h"],
+};
+
+export const isRetired = (strategy: string, timeframe: string) =>
+  RETIRED.timeframes.includes(timeframe) || RETIRED.setups.includes(`${strategy.replace(/_news$/, "")} ${timeframe}`);
+
 const mean = (xs: number[]) => xs.reduce((s, x) => s + x, 0) / xs.length;
 function sd(xs: number[]) {
   if (xs.length < 2) return 0;
@@ -55,9 +72,11 @@ export function profitFactor(rs: number[]) {
 /**
  * Should the setup's probation flag change? `replayRs` are the R outcomes (after slippage)
  * of its replayed signals, oldest first; `verdict` is the setup's latest verdict.
+ * A retired setup (isRetired) goes on probation at once and is never promoted.
  * Returns the new value, or null for no change.
  */
-export function probationTune(a: { probation: boolean; changedAt: string | null; replayRs: number[]; verdict: string | null; now: number }): boolean | null {
+export function probationTune(a: { probation: boolean; changedAt: string | null; replayRs: number[]; verdict: string | null; now: number; retired?: boolean }): boolean | null {
+  if (a.retired) return a.probation ? null : true;
   if (inCooldown(a.changedAt, a.now)) return null;
   if (a.probation) {
     if (a.replayRs.length < TUNE.minEntries) return null;

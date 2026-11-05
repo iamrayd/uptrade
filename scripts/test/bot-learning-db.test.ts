@@ -5,6 +5,7 @@ import { runAnalysis } from "../../supabase/functions/_shared/bot/analyze.ts";
 import { runTick } from "../../supabase/functions/_shared/bot/tick.ts";
 import { STRATEGIES } from "../../supabase/functions/_shared/bot/strategies.ts";
 import { TF_SECONDS, TIMEFRAMES } from "../../supabase/functions/_shared/bot/types.ts";
+import { disciplineFor } from "../../supabase/functions/_shared/bot/discipline.ts";
 import { fakeMarket, freshDb, pgAnalysisDb, pgDb, syntheticMinutes, USER } from "./helpers.ts";
 
 const DAY = 86400;
@@ -56,22 +57,32 @@ async function insertShadow(pg: PGlite, accId: string, strategy: string, i: numb
 
 test("probation is cleared on the probation replays alone: signals the other gates rejected do not count against the setup", { timeout: 300_000 }, async () => {
   const pg = await setup();
+  // Donchian 4h is not a retired setup; it is on probation here as if an "avoid" verdict had put it there.
+  const don4h = await account(pg, "donchian", "4h");
   const don15 = await account(pg, "donchian", "15m");
-  const flags = async () => (await pg.query<{ probation: boolean }>(`select probation from public.bot_accounts where id = $1`, [don15])).rows[0].probation;
-  assert.equal(await flags(), true, "15m setups start on probation");
+  const ema1h = await account(pg, "ema_trend", "1h");
+  const flag = async (id: string) => (await pg.query<{ probation: boolean }>(`select probation from public.bot_accounts where id = $1`, [id])).rows[0].probation;
+  const flags = () => flag(don4h);
+  assert.equal(await flag(don15), true, "15m setups start on probation");
+  assert.equal(await flag(ema1h), false);
   const nowMs = (START + 21 * DAY + 30 * 60) * 1000;
   // The flip cooldown has passed (measured against the analyzer's clock, not the wall clock).
-  await pg.query(`update public.bot_accounts set probation_changed_at = to_timestamp($2) where id = $1`, [don15, nowMs / 1000 - 10 * DAY]);
-  // 30 entries that passed every gate and were only held back by probation: 70% winners at +2R (PF 4.7).
-  for (let i = 0; i < 30; i++) await insertShadow(pg, don15, "donchian", i, "probation", i % 10 < 7 ? 2 : -1, { adx14: 30, confluence: 80 }, [], "15m");
-  // 60 signals the confluence gate rejected, all losers. They are learning data, not a verdict on the setup.
-  for (let i = 0; i < 60; i++) await insertShadow(pg, don15, "donchian", 100 + i, "confluence", -1, { adx14: 30, confluence: 50 }, [], "15m");
+  await pg.query(`update public.bot_accounts set probation = true, probation_changed_at = to_timestamp($2) where id = any($1::uuid[])`, [[don4h, don15], nowMs / 1000 - 10 * DAY]);
+  for (const [id, tf] of [[don4h, "4h"], [don15, "15m"]]) {
+    // 30 entries that passed every gate and were only held back by probation: 70% winners at +2R (PF 4.7).
+    for (let i = 0; i < 30; i++) await insertShadow(pg, id, "donchian", i, "probation", i % 10 < 7 ? 2 : -1, { adx14: 30, confluence: 80 }, [], tf);
+    // 60 signals the confluence gate rejected, all losers. They are learning data, not a verdict on the setup.
+    for (let i = 0; i < 60; i++) await insertShadow(pg, id, "donchian", 100 + i, "confluence", -1, { adx14: 30, confluence: 50 }, [], tf);
+  }
 
   const minutes = { BTCUSDT: syntheticMinutes(1, START, 22 * 1440, 60000), ETHUSDT: syntheticMinutes(2, START, 22 * 1440, 3000) };
   const market = fakeMarket(minutes, () => nowMs, { BTCUSDT: 0.00001, ETHUSDT: 0.0001 });
   const s = await runAnalysis({ market, db: pgAnalysisDb(pg), now: () => nowMs, narrator: null });
   assert.deepEqual(s.errors, []);
   assert.equal(await flags(), false, "30 profitable probation replays clear probation even when the gate-rejected replays lost");
+  // Retired setups (tuning.ts RETIRED): the same record does not promote a 15m setup, and a retired 1h setup is put on probation.
+  assert.equal(await flag(don15), true, "a retired setup is never promoted");
+  assert.equal(await flag(ema1h), true, "a retired setup goes on probation at the first analysis run");
 });
 
 test("analysis keeps learning: waiting lessons go live, lessons that stopped working retire, skipped signals are replayed in batches and teach", { timeout: 300_000 }, async () => {
@@ -220,7 +231,7 @@ test("engine: a busted bot keeps learning, news twins wait out events, losses co
   assert.ok(trades.filter(twin).every((t) => String(t.entry_reason).includes("News is no obstacle")), "a twin's journal says what the news was");
   assert.ok(trades.filter((t) => !twin(t)).every((t) => !String(t.entry_reason).includes("News is no obstacle")));
 
-  // Cooldown: after a loss on a coin, the next entry on it waits at least 3 bars.
+  // Cooldown: after a loss on a coin, the next entry on it waits the timeframe's cooldown (3 bars on 1h, 1 on 4h, none on 1d).
   const bySeries = new Map<string, typeof trades>();
   for (const t of trades) bySeries.set(`${t.account_id}:${t.symbol}`, [...(bySeries.get(`${t.account_id}:${t.symbol}`) ?? []), t]);
   let checked = 0;
@@ -229,7 +240,9 @@ test("engine: a busted bot keeps learning, news twins wait out events, losses co
       const prev = list[i - 1];
       if (prev.status !== "closed" || (prev.r_multiple as number) > -0.1) continue;
       const wait = +new Date(list[i].opened_at as string) - +new Date(prev.closed_at as string);
-      assert.ok(wait >= 3 * TF_SECONDS[prev.timeframe as keyof typeof TF_SECONDS] * 1000 - 1000, `re-entered ${wait / 60000} min after a loss on a ${prev.timeframe} bot`);
+      const bars = disciplineFor(prev.timeframe as string).cooldownBars;
+      if (!bars) continue;
+      assert.ok(wait >= bars * TF_SECONDS[prev.timeframe as keyof typeof TF_SECONDS] * 1000 - 1000, `re-entered ${wait / 60000} min after a loss on a ${prev.timeframe} bot`);
       checked++;
     }
   }

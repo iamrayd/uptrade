@@ -27,7 +27,7 @@ Open [`supabase/bot_cron.sql`](../../supabase/bot_cron.sql) and replace `<PROJEC
 
 ## 4. Start
 
-Open UpTrade → **Bots** → **Start bots**. Within a minute the accounts appear (one per strategy and timeframe, 48 with the news twins), and the status pill turns green (**Running**).
+Open UpTrade → **Bots** → **Start bots**. Within a minute the accounts appear (one per strategy and timeframe, 60 with the v2 variants and the news twins), and the status pill turns green (**Running**).
 
 ## 5. AI analysis and learning (optional, recommended)
 
@@ -84,4 +84,4 @@ npm install
 npm run backtest              # the last 365 days; or: npm run backtest -- --days 180
 ```
 
-This writes `docs/backtests/latest.md` with return, win rate, profit factor, average R, max drawdown and monthly consistency for all 30 setups (the news twins are skipped: there is no news history). Add `--gate 65 --discipline` to trade the way the live bots do now (confluence gate, cooldown after losses, smaller risk while down); `npm run backtest` alone trades every signal, as before. `node scripts/gate-sweep.ts` compares thresholds on an older and a newer half of the year.
+This writes `docs/backtests/latest.md` for all 42 setups (the news twins are skipped: there is no news history). The report keeps the **strategy** (trades, win rate, average R, total R: always without discipline) apart from the **account** (net $, return, max drawdown, monthly consistency). `npm run backtest` alone trades every signal with fees only. Add `--gate 65 --slip 0.05 --discipline` to trade the way the live bots do now: the confluence gate, 0.05% slippage on every taker fill, and the cooldown and risk cuts of each timeframe. `--maker` models limit-order entries (off in the live bots). `node scripts/gate-sweep.ts` compares thresholds on an older and a newer half of the year.

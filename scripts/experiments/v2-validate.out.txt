@@ -1,0 +1,69 @@
+=== 1. EXITS: v1 (cross exit + 2R target) vs chandelier trail, gate 65, taker entries, slip 0.05% ===
+avgR (trades); chosen on the OLDER half, checked on the NEWER half
+
+ema_trend        | 1h older      | 1h newer      | 4h older      | 4h newer      | 1d older      | 1d newer      | all TF older  | all TF newer
+v1               | -0.060 (205) | -0.144 (176) | +0.033 ( 48) | -0.086 ( 48) | +0.509 (  6) | +0.103 (  6) | -0.029 (259) | -0.125 (230)
+trail 2          | -0.104 (205) | -0.020 (169) | +0.048 ( 47) | -0.019 ( 48) | +1.154 (  6) | +0.825 (  6) | -0.047 (258) | +0.003 (223)
+trail 2.5        | -0.027 (204) | +0.076 (169) | -0.037 ( 47) | +0.379 ( 48) | +1.860 (  6) | +0.979 (  5) | +0.015 (257) | +0.162 (222)
+trail 3          | -0.087 (204) | +0.040 (167) | +0.168 ( 47) | +0.781 ( 48) | +1.808 (  6) | +0.767 (  5) | +0.004 (257) | +0.218 (220)
+trail 4          | -0.076 (198) | +0.248 (163) | +0.085 ( 46) | +0.845 ( 46) | +1.552 (  6) | +0.453 (  5) | -0.008 (250) | +0.381 (214)
+
+macd_adx        | 1h older      | 1h newer      | 4h older      | 4h newer      | 1d older      | 1d newer      | all TF older  | all TF newer
+v1               | -0.039 (130) | -0.056 (143) | +0.017 ( 37) | -0.312 ( 37) | +0.520 (  8) | -0.122 (  8) | -0.001 (175) | -0.109 (188)
+trail 2          | -0.028 (122) | +0.033 (132) | +0.163 ( 35) | -0.162 ( 35) | +1.195 (  6) | -0.543 (  7) | +0.058 (163) | -0.029 (174)
+trail 2.5        | -0.007 (119) | +0.111 (122) | +0.022 ( 34) | -0.317 ( 34) | +1.943 (  6) | -0.662 (  7) | +0.073 (159) | -0.011 (163)
+trail 3          | -0.057 (118) | +0.190 (121) | +0.160 ( 28) | -0.330 ( 32) | +1.859 (  6) | -0.792 (  7) | +0.059 (152) | +0.043 (160)
+trail 4          | -0.131 (113) | +0.627 (109) | -0.268 ( 28) | -0.510 ( 32) | +1.605 (  6) | -0.950 (  7) | -0.087 (147) | +0.306 (148)
+
+=== 2. ENTRIES: taker at the next open vs maker limit at the signal close (must fill within the live timeout; 1m candles, none starting in the first minute after the close is counted, as live) ===
+setup               | taker older    | taker newer    | maker older    | maker newer    | filled
+ema_trend 4h        | +0.033 ( 48) | -0.086 ( 48) | +0.000 ( 45) | -0.058 ( 44) | 89/96
+ema_trend 1d        | +0.509 (  6) | +0.103 (  6) | +0.792 (  5) | +0.116 (  6) | 11/12
+bb_rsi 1h           | +0.026 ( 22) | -0.034 ( 22) | +0.028 ( 21) | -0.073 ( 20) | 41/44
+bb_rsi 4h           | +0.124 (  7) | -0.587 (  6) | +0.155 (  7) | -0.560 (  6) | 13/13
+bb_rsi 1d           |    — (  0) | +1.292 (  1) |    — (  0) | +1.323 (  1) | 1/1
+donchian 4h         | -0.075 ( 95) | +0.342 ( 93) | -0.135 ( 97) | +0.380 ( 92) | 189/198
+donchian 1d         | +0.410 ( 14) | +0.750 (  9) | +0.422 ( 14) | +0.290 (  9) | 23/26
+macd_adx 1h         | -0.039 (130) | -0.056 (143) | -0.087 (117) | -0.003 (125) | 242/272
+macd_adx 1d         | +0.520 (  8) | -0.122 (  8) | +0.538 (  8) | -0.166 (  7) | 15/16
+supertrend 1d       | +0.097 (  8) | +1.212 (  5) | +0.102 (  8) | +1.225 (  5) | 13/13
+ema_trend_v2 1h     | -0.087 (204) | +0.040 (167) | -0.042 (172) | +0.084 (153) | 325/368
+ema_trend_v2 4h     | +0.168 ( 47) | +0.781 ( 48) | +0.216 ( 44) | +0.436 ( 44) | 88/95
+ema_trend_v2 1d     | +1.808 (  6) | +0.767 (  5) | +2.383 (  5) | +0.788 (  5) | 10/11
+macd_adx_v2 1h      | -0.057 (118) | +0.190 (121) | -0.193 (106) | +0.310 (107) | 213/241
+macd_adx_v2 4h      | +0.160 ( 28) | -0.330 ( 32) | +0.232 ( 26) | -0.629 ( 28) | 54/60
+macd_adx_v2 1d      | +1.859 (  6) | -0.792 (  7) | +1.895 (  6) | -0.831 (  6) | 12/13
+ALL                 | +0.019 (747) | +0.116 (721) | +0.007 (681) | +0.127 (658) | totalR taker +98.5 maker +87.9
+
+=== 3. DISCIPLINE (per-timeframe rules) on vs off: $ of a $100 account over the year, market entries ===
+timeframe | on $ (sum of setups) | off $ | setups
+1h        |   -21.86 |   -76.88 | 4
+4h        |    +9.70 |   +50.49 | 5
+1d        |   +89.18 |   +89.18 | 7
+
+=== 4. V2 BOOK as live: non-retired setups, gate 65, per-timeframe discipline, market entries, slip 0.05% ===
+setup               | older avgR (n) | newer avgR (n) | year $ | maxDD%
+ema_trend 4h        | -0.035 ( 42) | -0.082 ( 42) |  -23.69 | 36.3
+ema_trend 1d        | +0.509 (  6) | +0.103 (  6) |   +6.38 | 8.1
+bb_rsi 1h           | +0.026 ( 22) | -0.034 ( 22) |   -0.10 | 14.6
+bb_rsi 4h           | +0.124 (  7) | -0.587 (  6) |   -7.73 | 8.7
+bb_rsi 1d           |    — (  0) | +1.292 (  1) |   +2.58 | 0.4
+donchian 4h         | -0.039 ( 88) | +0.412 ( 87) |  +20.78 | 41.7
+donchian 1d         | +0.410 ( 14) | +0.750 (  9) |  +24.91 | 12.4
+macd_adx 1h         | +0.004 (112) | -0.039 (126) |   -6.55 | 32.8
+macd_adx 1d         | +0.520 (  8) | -0.122 (  8) |   +5.82 | 5.1
+supertrend 1d       | +0.097 (  8) | +1.212 (  5) |  +13.30 | 7.4
+ema_trend_v2 1h     | -0.138 (168) | +0.033 (139) |  -35.12 | 46.6
+ema_trend_v2 4h     | +0.184 ( 42) | +0.885 ( 45) |  +22.01 | 22.4
+ema_trend_v2 1d     | +1.808 (  6) | +0.767 (  5) |  +28.41 | 13.6
+macd_adx_v2 1h      | -0.057 (110) | +0.229 (112) |  +19.91 | 36.8
+macd_adx_v2 4h      | +0.160 ( 28) | -0.330 ( 32) |   -1.66 | 25.1
+macd_adx_v2 1d      | +1.859 (  6) | -0.792 (  7) |   +7.78 | 16.6
+
+BOOK: 16 setups. older avgR +0.023 (667) t=+0.37 | newer avgR +0.145 (652) t=+1.57 | year avgR +0.084 (1319)
+$100 split equally across the 16 setups: +4.81 $ over the year (+0.0132 $/day)
+
+Whole book, newer half: avgR +0.145, n 652 (flattered: the retired list used this half too)
+Picked on the older half (avgR > 0.05, n ≥ 10): donchian 1d, ema_trend_v2 4h, macd_adx_v2 4h
+  → their newer half: avgR +0.419 ( 86) t=+1.10  ⇒ validation bar NOT MET
+Single setups with newer-half avgR > +0.10 over 100+ trades: macd_adx_v2 1h (older half -0.057)

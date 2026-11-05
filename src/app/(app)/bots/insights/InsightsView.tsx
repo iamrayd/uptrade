@@ -205,6 +205,7 @@ const REASON: Record<string, string> = {
   busted: "Account busted",
   probation: "Setup on probation (shadow-only)",
   min_stop: "Stop too tight / size too small",
+  unfilled: "Limit order not filled in time",
 };
 
 function LearningEffect({ l, name }: { l: NonNullable<BotReport["data"]["learning"]>; name: (k: string) => string }) {

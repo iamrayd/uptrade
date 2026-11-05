@@ -3,7 +3,7 @@
 // The shadow-signal ledger (bot_filtered_signals) keeps feeding the learner either way.
 
 export const DISCIPLINE = {
-  /** Wait this many bars on a symbol after a loss there. */
+  /** Wait this many bars on a symbol after a loss there (1h and below; see disciplineFor). */
   cooldownBars: 3,
   /** Wait this many bars (any symbol) after this many losses in a row. */
   streakLosses: 3,
@@ -11,6 +11,19 @@ export const DISCIPLINE = {
   /** A closed trade at or below this R counts as a loss. */
   lossR: -0.1,
 };
+
+/**
+ * The rules by timeframe. A year replay (docs/strategies/V2-PLAN.md) showed the cooldown and the
+ * risk cuts cost the daily setups most of their return (Supertrend 1d −2.3% with them, +13.3%
+ * without): a daily bar is already a long wait, and a cut taken after a few losses is still in
+ * force when the one large winner arrives. So 1d runs without them, 4h waits a shorter time,
+ * and 1h and below keep the full rules.
+ */
+export function disciplineFor(timeframe?: string): { cooldownBars: number; streakCooldownBars: number; riskCuts: boolean } {
+  if (timeframe === "1d") return { cooldownBars: 0, streakCooldownBars: 0, riskCuts: false };
+  if (timeframe === "4h") return { cooldownBars: 1, streakCooldownBars: 2, riskCuts: true };
+  return { cooldownBars: DISCIPLINE.cooldownBars, streakCooldownBars: DISCIPLINE.streakCooldownBars, riskCuts: true };
+}
 
 export interface RecentTrade {
   symbol: string;
@@ -22,9 +35,10 @@ export interface RecentTrade {
  * Multiplier on the account's risk per trade, from how far the account is below its
  * starting balance and how its latest trades went. Smaller risk while losing keeps the
  * account alive to keep learning; it returns to full size once the account recovers.
- * `recent` is oldest first.
+ * `recent` is oldest first. On a timeframe without risk cuts (disciplineFor) it is always 1.
  */
-export function riskMultiplier(a: { equity: number; startBalance: number; recent: RecentTrade[] }): { mult: number; note: string | null } {
+export function riskMultiplier(a: { equity: number; startBalance: number; recent: RecentTrade[]; timeframe?: string }): { mult: number; note: string | null } {
+  if (!disciplineFor(a.timeframe).riskCuts) return { mult: 1, note: null };
   const ratio = a.startBalance > 0 ? a.equity / a.startBalance : 1;
   const rs = a.recent.slice(-10).map((t) => t.r ?? 0);
   const avg = rs.length ? rs.reduce((s, x) => s + x, 0) / rs.length : 0;
@@ -74,18 +88,19 @@ export function convictionMult(a: { cfScore: number | null; verdict: string | nu
 /**
  * Until when (ms) the account must not enter `symbol`, or null. After a loss on the symbol it waits
  * `cooldownBars`; after a streak of losses on the account it waits `streakCooldownBars`.
- * `recent` is oldest first.
+ * `recent` is oldest first. The bar counts come from the timeframe (disciplineFor); 0 means no wait.
  */
-export function cooldownUntil(recent: RecentTrade[], symbol: string, tfMs: number): { until: number; why: string } | null {
+export function cooldownUntil(recent: RecentTrade[], symbol: string, tfMs: number, timeframe?: string): { until: number; why: string } | null {
+  const d = disciplineFor(timeframe);
   let out: { until: number; why: string } | null = null;
   const lastOnSymbol = [...recent].reverse().find((t) => t.symbol === symbol);
-  if (lastOnSymbol && (lastOnSymbol.r ?? 0) <= DISCIPLINE.lossR) {
-    out = { until: +new Date(lastOnSymbol.closed_at) + DISCIPLINE.cooldownBars * tfMs, why: `a loss on ${symbol}: wait ${DISCIPLINE.cooldownBars} bars` };
+  if (d.cooldownBars > 0 && lastOnSymbol && (lastOnSymbol.r ?? 0) <= DISCIPLINE.lossR) {
+    out = { until: +new Date(lastOnSymbol.closed_at) + d.cooldownBars * tfMs, why: `a loss on ${symbol}: wait ${d.cooldownBars} bar${d.cooldownBars === 1 ? "" : "s"}` };
   }
   const tail = recent.slice(-DISCIPLINE.streakLosses);
-  if (tail.length === DISCIPLINE.streakLosses && tail.every((t) => (t.r ?? 0) <= DISCIPLINE.lossR)) {
-    const until = +new Date(tail[tail.length - 1].closed_at) + DISCIPLINE.streakCooldownBars * tfMs;
-    if (!out || until > out.until) out = { until, why: `${DISCIPLINE.streakLosses} losses in a row: wait ${DISCIPLINE.streakCooldownBars} bars` };
+  if (d.streakCooldownBars > 0 && tail.length === DISCIPLINE.streakLosses && tail.every((t) => (t.r ?? 0) <= DISCIPLINE.lossR)) {
+    const until = +new Date(tail[tail.length - 1].closed_at) + d.streakCooldownBars * tfMs;
+    if (!out || until > out.until) out = { until, why: `${DISCIPLINE.streakLosses} losses in a row: wait ${d.streakCooldownBars} bars` };
   }
   return out;
 }

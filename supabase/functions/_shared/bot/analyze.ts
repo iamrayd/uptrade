@@ -31,7 +31,7 @@ import {
   type TradeReview,
 } from "./analysis.ts";
 import type { AccountTune, AnalysisDb, AnalysisState, FilteredSignalRow, LessonChange, LessonRecord, Market, NewLesson } from "./io.ts";
-import { breakevenTune, convictionTune, probationTune, sweepConfluence, type SweepEntry } from "./tuning.ts";
+import { breakevenTune, convictionTune, isRetired, probationTune, sweepConfluence, type SweepEntry } from "./tuning.ts";
 
 // One analysis run. Called hourly by pg_cron → bot-analyze edge function.
 //
@@ -290,6 +290,7 @@ export async function runAnalysis(a: {
           replayRs: accShadows.filter((s) => s.reason === "probation").map((s) => +s.outcome_r),
           verdict: st.verdict,
           now: now(),
+          retired: isRetired(acc.strategy, acc.timeframe),
         });
         if (p != null) tune.probation = p;
         const entries: SweepEntry[] = [

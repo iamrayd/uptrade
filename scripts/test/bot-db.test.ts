@@ -4,6 +4,7 @@ import { runTick } from "../../supabase/functions/_shared/bot/tick.ts";
 import { closeMath, TAKER_FEE } from "../../supabase/functions/_shared/bot/risk.ts";
 import { STRATEGIES } from "../../supabase/functions/_shared/bot/strategies.ts";
 import { TIMEFRAMES } from "../../supabase/functions/_shared/bot/types.ts";
+import { isRetired } from "../../supabase/functions/_shared/bot/tuning.ts";
 import { fakeMarket, freshDb, pgDb, syntheticMinutes, USER, OTHER_USER } from "./helpers.ts";
 
 const DAY = 86400;
@@ -56,7 +57,10 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
   const trades = (await pg.query<Record<string, unknown>>(`select * from public.bot_trades order by opened_at`)).rows;
   const closed = trades.filter((t) => t.status === "closed");
   console.log(`  ${ticks} ticks, ${trades.length} trades (${closed.length} closed), market calls ${market.calls}`);
-  assert.ok(closed.length >= 20, "expected plenty of closed trades");
+  // Only the setups that are not retired trade (tuning.ts RETIRED), so the count is modest.
+  assert.ok(closed.length >= 12, "expected plenty of closed trades");
+  // Maker entries are off by default (risk.ts ENTRY): entries are market orders and pay the taker fee.
+  assert.ok(trades.every((t) => +(t.entry_fee as string) > 0), "market entries pay the taker fee");
   const reasons = new Set(closed.map((t) => t.exit_reason));
   for (const r of ["stop_loss", "take_profit", "signal"]) assert.ok(reasons.has(r), `no ${r} exits happened`);
 
@@ -128,7 +132,8 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
   assert.ok(blocked.every((b) => typeof b.features.confluence === "number" && (b.features.confluence as number) >= 65));
   // Every trade that was taken passed the gate and carries its confluence reading.
   assert.ok(trades.every((t) => typeof (t.entry_indicators as Record<string, number>).cfScore === "number" && (t.entry_indicators as Record<string, number>).cfScore >= 65));
-  assert.ok(trades.some((t) => t.strategy === "supertrend" && t.timeframe !== "15m"), "other timeframes are unaffected");
+  // The lesson is scoped to 15m: Supertrend signals on other timeframes are never attributed to it.
+  assert.ok(skipped.some((b) => b.strategy === "supertrend" && b.timeframe !== "15m" && b.reason !== "lesson"), "other timeframes are unaffected");
   // Each check's own result and the threshold used are stored with the trade (weight-0 checks become learnable).
   assert.ok(trades.every((t) => {
     const ind = t.entry_indicators as Record<string, number>;
@@ -136,11 +141,15 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
   }));
 
   // Probation: 5m–30m setups start shadow-only — zero trades, but their signals are kept with reason 'probation'.
+  // The retired higher-timeframe setups are held shadow-only by the engine too, before any analysis run has set their flag.
   const shortTf = (tf: unknown) => ["5m", "15m", "30m"].includes(tf as string);
+  const retired = (x: { strategy?: unknown; timeframe?: unknown }) => shortTf(x.timeframe) || isRetired(x.strategy as string, x.timeframe as string);
   assert.equal(trades.filter((t) => shortTf(t.timeframe)).length, 0, "a probation setup must not trade");
+  assert.equal(trades.filter(retired).length, 0, "a retired setup must not trade");
   const probation = skipped.filter((b) => b.reason === "probation");
   assert.ok(probation.length > 0, "probation setups should have logged shadow signals");
-  assert.ok(probation.every((b) => shortTf(b.timeframe) && b.lesson_ids.length === 0 && typeof b.features.confluence === "number"));
+  assert.ok(probation.some((b) => !shortTf(b.timeframe)), "retired 1h/4h setups log shadow signals too");
+  assert.ok(probation.every((b) => retired(b) && b.lesson_ids.length === 0 && typeof b.features.confluence === "number"));
   // Probation runs after the gates, so its shadows measure entries that would really have been traded.
   assert.ok(probation.every((b) => (b.features.confluence as number) >= 65));
 
@@ -157,6 +166,7 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
   const ev = (await pg.query<{ kind: string; n: number }>(`select kind, count(*)::int n from public.bot_events group by kind`)).rows;
   const count = (k: string) => ev.find((e) => e.kind === k)?.n ?? 0;
   assert.equal(count("opened"), trades.length);
+  assert.equal(count("placed"), 0, "no resting orders with maker entries off");
   assert.equal(count("closed"), closed.length);
   assert.equal(count("error"), 0);
 

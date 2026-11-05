@@ -30,8 +30,8 @@ export const CONFLUENCE = {
 /** The next timeframe up, used for the trend filter. 1d has none. */
 const HTF: Partial<Record<Timeframe, Timeframe>> = { "5m": "1h", "15m": "1h", "30m": "4h", "1h": "4h", "4h": "1d" };
 
-/** Strategy key without the news suffix. */
-export const baseKey = (key: string) => key.replace(/_news$/, "");
+/** The strategy whose trigger this one shares: the key without the news suffix or a version suffix (`_v2`). */
+export const baseKey = (key: string) => key.replace(/_news$/, "").replace(/_v\d+$/, "");
 
 /**
  * Merges bars into larger ones aligned to the epoch (like Binance). Only complete
