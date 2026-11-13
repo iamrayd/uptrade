@@ -3,14 +3,13 @@
 import Link from "next/link";
 import { useState } from "react";
 import { useBotInsights } from "@/hooks/useBots";
-import { createClient } from "@/lib/supabase/client";
-import { bumpData, toast } from "@/lib/store";
 import { fmtR } from "@/lib/bots";
 import { baseAsset, fmtDateTime, fmtPct, fmtSignedUsd, pnlClass } from "@/lib/format";
-import type { BotLesson, BotLessonStatus, BotReport, BotReportKind, BotSetupStats, BotTimingRow, BotVerdict } from "@/lib/types";
+import type { BotReport, BotReportKind, BotSetupStats, BotStrategyRow, BotTimingRow, BotVerdict } from "@/lib/types";
 import { AnalysisChat } from "@/components/AnalysisChat";
 import { TfBadge } from "@/components/BotBits";
-import { Button, Card, EmptyState, Segmented, Skeleton, cx } from "@/components/ui";
+import { BotsTabs, Glossary } from "@/components/BotNav";
+import { Card, EmptyState, Segmented, Skeleton, cx } from "@/components/ui";
 
 const KINDS: { value: BotReportKind; label: string }[] = [
   { value: "daily", label: "Daily" },
@@ -56,21 +55,21 @@ export function InsightsView() {
 
   return (
     <Shell>
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight">AI analysis</h1>
-          <p className="text-sm text-muted">
-            Rankings, post-mortems and lessons from every bot trade. Updated hourly; the bots use active lessons on their next entry.
-          </p>
-        </div>
-        <Segmented size="sm" className="w-full sm:w-80" value={kind} onChange={setKind} options={KINDS} />
+      <div className="max-w-2xl">
+        <h1 className="text-xl font-bold tracking-tight">Strategy bots</h1>
+        <p className="mt-0.5 text-sm text-muted">
+          What the trades say so far: which rule sets earn, why the losers lost, and what to change. Updated every hour. It only measures; the bots keep trading every signal.
+        </p>
       </div>
 
-      <AnalysisChat />
+      <BotsTabs />
 
-      <Learning lessons={d.lessons} autoLearn={d.settings?.auto_learn ?? true} hasSettings={!!d.settings} name={name} />
+      {report?.data.strategies && <RuleSets rows={report.data.strategies} />}
 
-      {report?.data.learning && <LearningEffect l={report.data.learning} name={name} />}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold">Report</h2>
+        <Segmented size="sm" className="w-full sm:w-80" value={kind} onChange={setKind} options={KINDS} />
+      </div>
 
       {!report ? (
         <Card>
@@ -82,248 +81,60 @@ export function InsightsView() {
       ) : (
         <Report r={report} name={name} />
       )}
+
+      <Glossary />
+
+      <AnalysisChat />
     </Shell>
   );
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="mx-auto max-w-6xl space-y-4 p-3 lg:p-6">
-      <Link href="/bots" className="inline-flex h-10 items-center gap-1 text-sm text-muted hover:text-fg">
-        <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2.5">
-          <path d="m15 18-6-6 6-6" />
-        </svg>
-        Bots
-      </Link>
-      {children}
-    </div>
-  );
+  return <div className="mx-auto max-w-6xl space-y-4 p-3 lg:p-6">{children}</div>;
 }
 
-// ───────────────────────── Learning ─────────────────────────
+// ───────────────────────── Rule sets ─────────────────────────
 
-const STATUS: Record<BotLessonStatus, { label: string; cls: string }> = {
-  active: { label: "Active", cls: "bg-up-soft text-up" },
-  proposed: { label: "Waiting for approval", cls: "bg-accent-soft text-accent" },
-  retired: { label: "Retired", cls: "bg-panel-2 text-faint" },
-  rejected: { label: "Rejected", cls: "bg-panel-2 text-faint" },
-};
-
-function Learning({ lessons, autoLearn, hasSettings, name }: { lessons: BotLesson[]; autoLearn: boolean; hasSettings: boolean; name: (k: string) => string }) {
-  const [busy, setBusy] = useState<string | null>(null);
-  const [showOld, setShowOld] = useState(false);
-  const live = lessons.filter((l) => l.status === "active" || l.status === "proposed");
-  const old = lessons.filter((l) => l.status === "retired" || l.status === "rejected");
-  const active = lessons.filter((l) => l.status === "active");
-  const savedR = active.reduce((s, l) => s - Number(l.blocked_r), 0);
-  const checked = active.reduce((s, l) => s + l.blocked, 0);
-
-  async function run(id: string, fn: () => PromiseLike<{ error: { message: string } | null }>, done: string) {
-    setBusy(id);
-    try {
-      const { error } = await fn();
-      if (error) throw new Error(error.message);
-      toast("success", done);
-      bumpData();
-    } catch (e) {
-      toast("error", "Couldn't update", (e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  }
-  const setStatus = (l: BotLesson, status: BotLessonStatus) =>
-    run(l.id, () => createClient().rpc("bot_set_lesson_status", { p_id: l.id, p_status: status }), status === "active" ? "Lesson switched on" : status === "rejected" ? "Lesson rejected" : "Lesson paused");
-  const toggleAuto = () =>
-    run(
-      "auto",
-      async () => {
-        const sb = createClient();
-        const { data: u } = await sb.auth.getUser();
-        if (!u.user) return { error: { message: "Not signed in" } };
-        return sb.from("bot_settings").update({ auto_learn: !autoLearn, updated_at: new Date().toISOString() }).eq("user_id", u.user.id);
-      },
-      autoLearn ? "New lessons will wait for your approval" : "New lessons will switch on automatically",
-    );
-
+/** Each rule set over all its timeframes, all time: the table to drop and keep rule sets from. */
+function RuleSets({ rows }: { rows: BotStrategyRow[] }) {
   return (
-    <Card className="p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="font-semibold">What the bots learned</h2>
-          <p className="mt-0.5 max-w-2xl text-sm text-muted">
-            Each run studies the losing trades <em>and</em> the signals the bots skipped (replayed afterwards), looks for entry conditions they share, and keeps a filter only if it&apos;s
-            statistically clear on older entries <em>and</em> still holds on the newer ones it wasn&apos;t learned from. Named mistakes (a stop inside the noise, a weak trend, trading against the
-            news …) need less evidence than a blind search. Signals a lesson blocks are replayed later; a lesson that would have cost money, now or lately, is retired.
-          </p>
-        </div>
-        {hasSettings && (
-          <Button size="sm" variant="outline" loading={busy === "auto"} onClick={toggleAuto}>
-            Auto-learn: {autoLearn ? "on" : "off"}
-          </Button>
-        )}
-      </div>
-      <div className="num mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-        <Stat label="Active lessons" value={String(active.length)} />
-        <Stat label="Waiting for room" value={String(lessons.filter((l) => l.status === "proposed" && !l.paused).length)} />
-        <Stat label="Blocked signals checked" value={String(checked)} />
-        <Stat label="R saved by active lessons" value={checked ? fmtR(savedR) : "—"} cls={pnlClass(savedR)} />
-      </div>
-      {!live.length ? (
-        <p className="mt-4 rounded-lg bg-panel-2 px-3 py-2 text-sm text-muted">
-          No lessons yet. A setup needs 30+ entries (its trades plus the signals it skipped) before a filter is learned from it (20+ for the named mistakes), and a lesson needs a clear pattern, so expect the first ones after a few weeks.
+    <Card className="overflow-hidden">
+      <div className="border-b border-line px-4 py-3">
+        <div className="text-sm font-semibold">Rule sets, since the start</div>
+        <p className="mt-0.5 text-xs text-muted">
+          Each rule set over its three charts together, best first. This is the table to decide from: keep what stays above zero after 30 or more trades.
         </p>
-      ) : (
-        <ul className="mt-4 space-y-2">
-          {live.map((l) => (
-            <LessonItem key={l.id} l={l} name={name} busy={busy === l.id} onStatus={(s) => setStatus(l, s)} />
-          ))}
-        </ul>
-      )}
-      {old.length > 0 && (
-        <div className="mt-3">
-          <button className="text-xs text-accent" onClick={() => setShowOld((v) => !v)}>
-            {showOld ? "Hide" : "Show"} {old.length} retired or rejected
-          </button>
-          {showOld && (
-            <ul className="mt-2 space-y-2">
-              {old.map((l) => (
-                <LessonItem key={l.id} l={l} name={name} busy={busy === l.id} onStatus={(s) => setStatus(l, s)} />
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-    </Card>
-  );
-}
-
-const REASON: Record<string, string> = {
-  confluence: "Too few indicators agreed",
-  news: "News gate",
-  cooldown: "Cooling down after a loss",
-  lesson: "Blocked by a lesson",
-  busted: "Account busted",
-  probation: "Setup on probation (shadow-only)",
-  min_stop: "Stop too tight / size too small",
-  unfilled: "Limit order not filled in time",
-  playbook: "Passed on by the playbook (aggressive accounts)",
-};
-
-function LearningEffect({ l, name }: { l: NonNullable<BotReport["data"]["learning"]>; name: (k: string) => string }) {
-  const label = (s: { strategy: string; timeframe: string | null }) => `${name(s.strategy)} ${s.timeframe ?? ""}`.trim();
-  const gate = l.gate;
-  return (
-    <Card className="p-4">
-      <h2 className="font-semibold">Are the bots getting better?</h2>
-      <p className="mt-0.5 max-w-2xl text-sm text-muted">
-        Average R per trade (after slippage) before the first lesson switched on vs since, the mistakes that cost the most, and what the entry gate and the other filters skipped. Small samples are noise: wait for 30+
-        trades since.
-      </p>
-      <div className="mt-3 grid gap-4 lg:grid-cols-2">
-        <div>
-          <div className="text-xs font-semibold text-muted">Entries before vs after lessons</div>
-          {!l.impact.length ? (
-            <p className="mt-1 text-xs text-faint">No setup has an active lesson yet.</p>
-          ) : (
-            <ul className="num mt-1 divide-y divide-line text-xs">
-              {[...l.impact]
-                .sort((a, b) => b.after.n - a.after.n)
-                .map((r) => {
-                  const better = r.before.avgR != null && r.after.avgR != null && r.after.avgR > r.before.avgR;
-                  return (
-                    <li key={`${r.strategy}${r.timeframe}`} className="flex items-center justify-between gap-2 py-1.5">
-                      <span className="truncate">{label(r)}</span>
-                      <span className="whitespace-nowrap text-muted">
-                        {fmtR(r.before.avgR)} <span className="text-faint">({r.before.n})</span> →{" "}
-                        <span className={cx("font-semibold", r.after.n ? (better ? "text-up" : "text-down") : "text-faint")}>{r.after.n ? fmtR(r.after.avgR) : "—"}</span>{" "}
-                        <span className="text-faint">({r.after.n})</span>
-                      </span>
-                    </li>
-                  );
-                })}
-            </ul>
-          )}
-        </div>
-        <div>
-          <div className="text-xs font-semibold text-muted">Mistakes that cost the most</div>
-          {!l.tags.length ? (
-            <p className="mt-1 text-xs text-faint">No mistake has cost anything measurable yet.</p>
-          ) : (
-            <ul className="num mt-1 divide-y divide-line text-xs">
-              {l.tags.map((t) => (
-                <li key={t.tag} className="py-1.5">
-                  <div className="flex justify-between gap-2">
-                    <span className="font-medium text-fg">{t.label}</span>
-                    <span className="text-down">−{t.costR.toFixed(1)}R</span>
-                  </div>
-                  <div className="text-faint">
-                    {t.withN} entries with it averaged {fmtR(t.withAvgR)}, {t.withoutN} without {fmtR(t.withoutAvgR)}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
       </div>
-      {(l.replayed.length > 0 || gate.skippedN > 0) && (
-        <div className="mt-4">
-          <div className="text-xs font-semibold text-muted">Signals the bots did not trade (replayed afterwards)</div>
-          <ul className="num mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-            {l.replayed.map((r) => (
-              <li key={r.reason}>
-                {REASON[r.reason] ?? r.reason}: {r.n} · would have made {fmtR(r.avgR)} each
-              </li>
+      <div className="overflow-x-auto">
+        <table className="num w-full min-w-[520px] text-sm">
+          <thead className="text-left text-xs text-muted">
+            <tr>
+              <th className="px-4 py-2 font-medium">Rule set</th>
+              <th className="px-2 py-2 text-right font-medium">Trades</th>
+              <th className="px-2 py-2 text-right font-medium">Win rate</th>
+              <th className="px-2 py-2 text-right font-medium">Avg R</th>
+              <th className="px-2 py-2 text-right font-medium">Profit factor</th>
+              <th className="px-4 py-2 text-right font-medium">Net</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {rows.map((r) => (
+              <tr key={r.strategy}>
+                <td className="px-4 py-2 font-semibold">{r.name}</td>
+                <td className="px-2 py-2 text-right">
+                  {r.trades}
+                  {r.trades > 0 && r.trades < 30 && <span className="ml-1 text-xs text-faint">too few</span>}
+                </td>
+                <td className="px-2 py-2 text-right">{r.winRate == null ? "—" : `${r.winRate.toFixed(0)}%`}</td>
+                <td className={cx("px-2 py-2 text-right font-semibold", pnlClass(r.avgR))}>{fmtR(r.avgR)}</td>
+                <td className="px-2 py-2 text-right">{r.profitFactor == null ? "—" : r.profitFactor.toFixed(2)}</td>
+                <td className={cx("px-4 py-2 text-right", pnlClass(r.netUsd))}>{r.trades ? fmtSignedUsd(r.netUsd) : "—"}</td>
+              </tr>
             ))}
-          </ul>
-          {gate.skippedN >= 5 && (
-            <p className="mt-1 text-xs text-muted">
-              The indicator gate skipped {gate.skippedN} signals that would have averaged {fmtR(gate.skippedAvgR)}; the {gate.tradedN} trades it let through averaged {fmtR(gate.tradedAvgR)}.
-            </p>
-          )}
-        </div>
-      )}
+          </tbody>
+        </table>
+      </div>
     </Card>
-  );
-}
-
-function LessonItem({ l, name, busy, onStatus }: { l: BotLesson; name: (k: string) => string; busy: boolean; onStatus: (s: BotLessonStatus) => void }) {
-  const st = l.status === "proposed" && l.paused ? { label: "Paused", cls: "bg-panel-2 text-muted" } : STATUS[l.status];
-  const avg = l.blocked ? Number(l.blocked_r) / l.blocked : null;
-  return (
-    <li className="rounded-lg border border-line p-3">
-      <div className="flex flex-wrap items-center gap-1.5 text-xs">
-        <span className={cx("rounded px-1.5 py-0.5 font-semibold", st.cls)}>{st.label}</span>
-        <span className="font-semibold text-fg">{name(l.strategy)}</span>
-        {l.timeframe ? <TfBadge tf={l.timeframe} /> : <span className="text-faint">all timeframes</span>}
-        {l.source === "ai" && <span className="rounded bg-amber-400/15 px-1.5 py-0.5 font-semibold text-amber-400">AI idea</span>}
-        <span className="ml-auto text-faint">{fmtDateTime(l.created_at)}</span>
-      </div>
-      <div className="mt-1.5 text-sm font-medium">{l.title.replace(/^[^:]+:\s*/, "")}</div>
-      <p className="mt-1 text-xs leading-relaxed text-muted">{l.explanation}</p>
-      {l.blocked > 0 && (
-        <p className="num mt-1 text-xs text-muted">
-          Blocked {l.blocked} signal{l.blocked > 1 ? "s" : ""} so far; they would have made {fmtR(Number(l.blocked_r))} ({fmtR(avg)} each).
-        </p>
-      )}
-      {l.retired_reason && <p className="mt-1 text-xs text-amber-400">{l.retired_reason}</p>}
-      <div className="mt-2 flex gap-2">
-        {l.status !== "active" && (
-          <Button size="sm" variant="outline" loading={busy} onClick={() => onStatus("active")}>
-            Switch on
-          </Button>
-        )}
-        {l.status === "active" && (
-          <Button size="sm" variant="ghost" loading={busy} onClick={() => onStatus("proposed")}>
-            Pause
-          </Button>
-        )}
-        {l.status !== "rejected" && (
-          <Button size="sm" variant="ghost" loading={busy} onClick={() => onStatus("rejected")}>
-            Reject
-          </Button>
-        )}
-      </div>
-    </li>
   );
 }
 
@@ -380,7 +191,7 @@ function Report({ r, name }: { r: BotReport; name: (k: string) => string }) {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="p-4">
-          <h2 className="font-semibold">Why entries failed</h2>
+          <h2 className="font-semibold">Why trades lost</h2>
           {n && n.mistakes.length > 0 && (
             <ul className="mt-2 space-y-2 text-sm">
               {n.mistakes.map((m, i) => (
@@ -395,7 +206,7 @@ function Report({ r, name }: { r: BotReport; name: (k: string) => string }) {
           <MistakeTable title="All time" rows={d.mistakes.allTime} />
         </Card>
         <Card className="p-4">
-          <h2 className="font-semibold">How to improve</h2>
+          <h2 className="font-semibold">What to change</h2>
           {n && n.improvements.length > 0 ? (
             <ul className="mt-2 space-y-3 text-sm">
               {n.improvements.map((m, i) => (
@@ -442,7 +253,6 @@ function Report({ r, name }: { r: BotReport; name: (k: string) => string }) {
                     <span className="num ml-auto font-semibold text-down">{fmtR(e.r)}</span>
                   </div>
                   <div className="mt-1 text-muted">{e.why}</div>
-                  {e.flags.length > 0 && <div className="mt-1 text-xs text-amber-400">{e.flags.join(" ")}</div>}
                   <div className="mt-1 text-xs text-faint">Fix: {e.fix}</div>
                 </Link>
               </li>
@@ -462,7 +272,7 @@ function Report({ r, name }: { r: BotReport; name: (k: string) => string }) {
       </Card>
 
       <Card className="overflow-hidden">
-        <div className="border-b border-line px-4 py-3 text-sm font-semibold">Every setup</div>
+        <div className="border-b border-line px-4 py-3 text-sm font-semibold">Every rule set and chart, scored</div>
         <div className="overflow-x-auto">
           <table className="num w-full min-w-[720px] text-sm">
             <thead className="text-xs text-muted">

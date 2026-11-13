@@ -1,70 +1,142 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { runTick } from "../../supabase/functions/_shared/bot/tick.ts";
-import { closeMath, TAKER_FEE } from "../../supabase/functions/_shared/bot/risk.ts";
+import { closeMath, MIN_STOP_PCT, planEntry, TAKER_FEE } from "../../supabase/functions/_shared/bot/risk.ts";
 import { strategyMeta } from "../../supabase/functions/_shared/bot/io.ts";
-import { STRATEGIES } from "../../supabase/functions/_shared/bot/strategies.ts";
-import { TIMEFRAMES } from "../../supabase/functions/_shared/bot/types.ts";
-import { isRetired } from "../../supabase/functions/_shared/bot/tuning.ts";
-import { fakeMarket, freshDb, pgDb, syntheticMinutes, USER, OTHER_USER } from "./helpers.ts";
+import { STRATEGIES, STRATEGY_BY_KEY } from "../../supabase/functions/_shared/bot/strategies.ts";
+import { TF_SECONDS, TIMEFRAMES, type Timeframe } from "../../supabase/functions/_shared/bot/types.ts";
+import { aggregate, fakeMarket, freshDb, pgDb, syntheticMinutes, USER, OTHER_USER } from "./helpers.ts";
 
 const DAY = 86400;
 const START = 1_760_000_000 - (1_760_000_000 % DAY); // UTC midnight
 const near = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps * Math.max(1, Math.abs(a), Math.abs(b));
+const sec = (iso: unknown) => new Date(iso as string).getTime() / 1000;
 
-test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 600_000 }, async () => {
+test("bot engine: over 8 simulated days every signal is traded as its rule set says, and the books stay exact", { timeout: 900_000 }, async () => {
   const pg = await freshDb();
   await pg.query(`insert into auth.users (id) values ($1), ($2)`, [USER, OTHER_USER]);
   await pg.query(`insert into public.bot_settings (user_id) values ($1)`, [USER]); // $100, 2%, 20x defaults
 
+  // 64 days of minutes: enough 4h bars for every rule set's warm-up before the simulated days.
+  const DAYS = 64;
   const minutes = {
-    BTCUSDT: syntheticMinutes(1, START, 22 * 1440, 60000),
-    ETHUSDT: syntheticMinutes(2, START, 22 * 1440, 3000),
-    SOLUSDT: syntheticMinutes(3, START, 22 * 1440, 150),
+    BTCUSDT: syntheticMinutes(1, START, DAYS * 1440, 60000),
+    ETHUSDT: syntheticMinutes(2, START, DAYS * 1440, 3000),
+    SOLUSDT: syntheticMinutes(3, START, DAYS * 1440, 150),
   };
   let nowMs = 0;
   const market = fakeMarket(minutes, () => nowMs, { BTCUSDT: 0.00001, ETHUSDT: 0.0001, SOLUSDT: 0.001 });
   const db = pgDb(pg);
 
-  // An active lesson that blocks every Supertrend 15m entry (any stop distance ≥ 0).
-  await db.sync(strategyMeta(STRATEGIES), TIMEFRAMES);
-  await pg.query(
-    `insert into public.bot_lessons (user_id, strategy, timeframe, feature, op, value, status, title, explanation)
-     values ($1, 'supertrend', '15m', 'stopPct', 'gte', '0', 'active', 'block all', 'test')`,
-    [USER],
-  );
-
-  // Run every 5 minutes (+60s) for days 18–22, with one 20-hour outage on day 19.
-  const simStart = START + 18 * DAY;
+  // Run every 5 minutes (+60s) for the last 8 days, with one 20-hour outage on the second day.
+  const simStart = START + (DAYS - 8) * DAY;
+  const simEnd = START + DAYS * DAY - 3 * 3600; // the runs after the loop need candles too
   const outage = [simStart + DAY + 3600, simStart + DAY + 21 * 3600];
-  let ticks = 0;
-  for (let t = simStart + 60; t < START + 22 * DAY - 300; t += 300) {
+  const tickTimes: number[] = [];
+  let signals = 0;
+  let opened = 0;
+  let skippedSignals = 0;
+  for (let t = simStart + 60; t < simEnd; t += 300) {
     if (t > outage[0] && t < outage[1]) continue;
     nowMs = t * 1000;
     const s = await runTick({ market, db, now: () => nowMs });
     assert.equal(s.skipped, undefined, `tick skipped: ${s.skipped}`);
     assert.deepEqual(s.errors, [], `tick errors at ${new Date(nowMs).toISOString()}`);
-    ticks++;
+    signals += s.signals;
+    opened += s.opened;
+    skippedSignals += s.signalsSkipped;
+    tickTimes.push(t);
   }
-  assert.ok(ticks > 800);
+  assert.ok(tickTimes.length > 1800);
 
-  // 30 accounts (5 strategies × 6 timeframes), all for USER only.
+  // 15 accounts: five rule sets × 15m, 1h, 4h, all for USER only, none held back.
   const accounts = (await pg.query<{ id: string; user_id: string; strategy: string; timeframe: string; balance: string; start_balance: string; status: string }>(
     `select * from public.bot_accounts`,
   )).rows;
-  // One account per strategy and timeframe; a strategy with its own timeframe list (the aggressive one) only gets those.
-  assert.equal(accounts.length, STRATEGIES.reduce((n, s) => n + (s.timeframes?.length ?? TIMEFRAMES.length), 0));
-  assert.ok(accounts.every((a) => a.user_id === USER));
+  assert.equal(accounts.length, 15);
+  assert.deepEqual([...new Set(accounts.map((a) => a.strategy))].sort(), STRATEGIES.map((s) => s.key).sort());
+  assert.deepEqual([...new Set(accounts.map((a) => a.timeframe))].sort(), [...TIMEFRAMES].sort());
+  assert.ok(accounts.every((a) => a.user_id === USER && +a.start_balance === 100));
 
   const trades = (await pg.query<Record<string, unknown>>(`select * from public.bot_trades order by opened_at`)).rows;
   const closed = trades.filter((t) => t.status === "closed");
-  console.log(`  ${ticks} ticks, ${trades.length} trades (${closed.length} closed), market calls ${market.calls}`);
-  // Only the setups that are not retired trade (tuning.ts RETIRED), so the count is modest.
-  assert.ok(closed.length >= 12, "expected plenty of closed trades");
-  // Maker entries are off by default (risk.ts ENTRY): entries are market orders and pay the taker fee.
-  assert.ok(trades.every((t) => +(t.entry_fee as string) > 0), "market entries pay the taker fee");
+  const skips = (await pg.query<{ account_id: string; symbol: string; data: { reason: string; signal_bar_time: string } }>(`select account_id, symbol, data from public.bot_events where kind = 'skipped'`)).rows;
+  console.log(`  ${tickTimes.length} ticks, ${signals} signals → ${trades.length} trades (${closed.length} closed), ${skips.length} not opened, market calls ${market.calls}`);
+
+  // ── Every signal is accounted for: it was opened, or it could not be (and says why). ──
+  assert.equal(opened, trades.length);
+  assert.equal(signals, opened + skippedSignals, "a signal is either opened or logged as not opened");
+  assert.equal(skips.length, skippedSignals);
+  assert.ok(skips.every((e) => ["busted", "stale", "sizing"].includes(e.data.reason)), "no gate, lesson, cooldown or probation exists any more");
+  assert.ok(trades.length >= 40, `expected plenty of trades, got ${trades.length}`);
+  // Every rule set traded, and so did every timeframe.
+  for (const s of STRATEGIES) assert.ok(trades.some((t) => t.strategy === s.key), `${s.key} took no trade`);
+  for (const tf of TIMEFRAMES) assert.ok(trades.some((t) => t.timeframe === tf), `no trade on ${tf}`);
+
+  // ── Each trade is exactly what its rule set signalled on that bar. ──
+  const barsOf = new Map<string, ReturnType<typeof aggregate>>();
+  const bars = (symbol: string, tf: string) => {
+    const k = `${symbol}:${tf}`;
+    if (!barsOf.has(k)) barsOf.set(k, aggregate(minutes[symbol as keyof typeof minutes], TF_SECONDS[tf as Timeframe]));
+    return barsOf.get(k)!;
+  };
+  const signalAt = (strategy: string, symbol: string, tf: string, barTime: number) => {
+    const all = bars(symbol, tf);
+    const i = all.findIndex((c) => c.time === barTime);
+    assert.ok(i >= 0);
+    const sig = STRATEGY_BY_KEY[strategy].entry(all.slice(Math.max(0, i + 1 - 600), i + 1));
+    return sig && !("skip" in sig) ? sig : null;
+  };
+  let widened = 0;
+  for (const t of trades) {
+    const sig = signalAt(t.strategy as string, t.symbol as string, t.timeframe as string, sec(t.signal_bar_time));
+    assert.ok(sig, `${t.strategy} ${t.timeframe} ${t.symbol}: a trade without a signal on its bar`);
+    assert.equal(t.side, sig.side);
+    assert.equal(t.entry_reason, sig.reason);
+    const plan = planEntry({ side: sig.side, entry: +(t.entry_price as string), stop: sig.stop, takeProfit: sig.takeProfit, tick: 0.01 });
+    assert.ok(!("skip" in plan));
+    if ("skip" in plan) continue;
+    assert.ok(near(+(t.initial_stop as string), plan.stop, 1e-9), `${t.strategy}: stop ${t.initial_stop} vs the rule's ${plan.stop}`);
+    assert.equal(t.take_profit == null ? null : +(t.take_profit as string), plan.takeProfit, `${t.strategy}: target`);
+    if (plan.note) {
+      widened++;
+      assert.ok((t.sizing_notes as string[]).some((n) => n.includes("widened")), "a widened stop is explained in the journal");
+    }
+    // Entered right after the signal bar closed, not later.
+    const tfSec = TF_SECONDS[t.timeframe as Timeframe];
+    assert.equal(sec(t.opened_at), sec(t.signal_bar_time) + tfSec + 60);
+  }
+  assert.ok(widened > 0, "some 15m stops are under the 0.4% minimum: they must be widened and traded, not dropped");
+  assert.ok(trades.every((t) => Math.abs(+(t.entry_price as string) - +(t.initial_stop as string)) / +(t.entry_price as string) >= MIN_STOP_PCT));
+
+  // ── The converse: every signal a flat account saw on a bar it acted on became a trade (or a logged skip). ──
+  const ticked = new Set(tickTimes);
+  let checked = 0;
+  for (const a of accounts) {
+    const tfSec = TF_SECONDS[a.timeframe as Timeframe];
+    const strat = STRATEGY_BY_KEY[a.strategy];
+    for (const symbol of Object.keys(minutes)) {
+      const mine = trades.filter((t) => t.account_id === a.id && t.symbol === symbol);
+      const all = bars(symbol, a.timeframe);
+      for (let i = strat.warmup - 1; i < all.length; i++) {
+        const evalAt = all[i].time + tfSec + 60; // the run that acts on this bar
+        if (evalAt < simStart || !ticked.has(evalAt)) continue;
+        const sig = strat.entry(all.slice(Math.max(0, i + 1 - 600), i + 1));
+        if (!sig || "skip" in sig) continue;
+        const holding = mine.some((t) => sec(t.opened_at) < evalAt && (t.closed_at == null || sec(t.closed_at) > evalAt));
+        if (holding) continue; // one position per coin: the open trade is managed instead
+        checked++;
+        const took = mine.some((t) => sec(t.signal_bar_time) === all[i].time);
+        const logged = skips.some((e) => e.account_id === a.id && e.symbol === symbol && sec(e.data.signal_bar_time) === all[i].time);
+        assert.ok(took || logged, `${a.strategy} ${a.timeframe} ${symbol}: the signal on ${new Date(all[i].time * 1000).toISOString()} was neither traded nor logged`);
+      }
+    }
+  }
+  assert.equal(checked, signals, "the engine saw exactly the signals the rule sets give on those bars");
+
   const reasons = new Set(closed.map((t) => t.exit_reason));
-  for (const r of ["stop_loss", "take_profit", "signal"]) assert.ok(reasons.has(r), `no ${r} exits happened`);
+  for (const r of ["stop_loss", "take_profit"]) assert.ok(reasons.has(r), `no ${r} exits happened`);
 
   // Books: balance = start + Σ closed net − Σ open (margin + entry fee).
   for (const a of accounts) {
@@ -79,24 +151,22 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
     const side = t.side as "long" | "short";
     const entry = +(t.entry_price as string);
     const stop0 = +(t.initial_stop as string);
-    // Stop on the right side at entry; liquidation beyond the stop.
+    // Stop and target on the right side at entry; liquidation beyond the stop.
     assert.ok(side === "long" ? stop0 < entry : stop0 > entry);
+    if (t.take_profit != null) assert.ok(side === "long" ? +(t.take_profit as string) > entry : +(t.take_profit as string) < entry, "target on the wrong side");
     for (const p of [stop0, t.take_profit == null ? null : +(t.take_profit as string)])
       if (p != null) assert.ok(Math.abs(p * 100 - Math.round(p * 100)) < 1e-6, `${p} is off the 0.01 tick`);
     const liq = +(t.liq_price as string);
     if (liq > 0) assert.ok(side === "long" ? liq < stop0 : liq > stop0, "liquidation must be beyond the stop");
     assert.ok(+(t.leverage as number) <= 20);
-    // 2% for the ordinary bots; an aggressive account's playbook may risk up to 10%.
-    assert.ok(+(t.risk_pct as string) <= (t.strategy === "aggro" ? 0.1 : 0.02) + 1e-9, `${t.strategy}: risk ${t.risk_pct}`);
-    // Entries only after the signal bar closed.
-    assert.ok(new Date(t.opened_at as string).getTime() > new Date(t.signal_bar_time as string).getTime());
+    assert.ok(+(t.risk_pct as string) <= 0.02 + 1e-9, `${t.strategy}: risk ${t.risk_pct}`);
+    assert.ok(+(t.entry_fee as string) > 0, "market entries pay the taker fee");
     assert.ok((t.entry_reason as string).length > 30);
     assert.ok(Object.keys(t.entry_indicators as object).length >= 3);
     // Trailing stops only ever tighten.
     let prev = stop0;
     for (const ev of t.stop_history as { from: number; to: number }[]) {
       assert.ok(side === "long" ? ev.to > prev : ev.to < prev, `stop didn't strictly tighten: ${prev} → ${ev.to}`);
-      assert.ok(Math.abs(ev.to * 100 - Math.round(ev.to * 100)) < 1e-6, `trailed stop ${ev.to} is off the 0.01 tick`);
       prev = ev.to;
     }
     if (t.status !== "closed") continue;
@@ -111,7 +181,6 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
     // Fills are consistent with the trade's own levels.
     const exit = +(t.exit_price as string);
     if (reason === "take_profit") assert.ok(near(exit, +(t.take_profit as string)));
-    // Stop ORDER fills (not "trail already breached → closed at market") fill at the stop or worse.
     if ((reason === "stop_loss" || reason === "trailing_stop") && !(t.exit_note as string).includes("Closed at market")) {
       const stop = +(t.stop_price as string);
       assert.ok(side === "long" ? exit <= stop + 1e-9 : exit >= stop - 1e-9, `stop filled better than the stop: ${JSON.stringify({ reason, side, exit, stop, note: t.exit_note })}`);
@@ -119,58 +188,15 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
     assert.ok(new Date(t.closed_at as string) >= new Date(t.opened_at as string));
   }
 
-  // The lesson kept Supertrend 15m out of every trade, and each blocked signal was kept for review.
-  assert.equal(trades.filter((t) => t.strategy === "supertrend" && t.timeframe === "15m").length, 0);
-  const skipped = (await pg.query<{ strategy: string; timeframe: string; features: Record<string, unknown>; lesson_ids: string[]; reason: string }>(`select * from public.bot_filtered_signals`)).rows;
-  const blocked = skipped.filter((b) => b.reason === "lesson");
-  assert.ok(blocked.length > 0, "the lesson should have blocked some signals");
-  assert.ok(blocked.every((b) => b.strategy === "supertrend" && b.timeframe === "15m" && b.lesson_ids.length === 1 && typeof b.features.stopPct === "number"));
-  // Signals the confluence gate skipped are kept too, with the score they were skipped at, for the learner to replay.
-  const gated = skipped.filter((b) => b.reason === "confluence");
-  assert.ok(gated.length > 0, "the confluence gate should have skipped some signals");
-  assert.ok(gated.every((b) => b.lesson_ids.length === 0 && typeof b.features.confluence === "number"));
-  // Most were skipped for scoring under 65; the rest scored higher but were refused outright (price against both EMA 200 and Supertrend).
-  assert.ok(gated.some((b) => (b.features.confluence as number) < 65));
-  // Gates run before lessons, so a lesson is never credited with a signal the gate had already skipped.
-  assert.ok(blocked.every((b) => typeof b.features.confluence === "number" && (b.features.confluence as number) >= 65));
-  // Every trade that was taken passed the gate and carries its confluence reading.
-  assert.ok(trades.filter((t) => t.strategy !== "aggro").every((t) => typeof (t.entry_indicators as Record<string, number>).cfScore === "number" && (t.entry_indicators as Record<string, number>).cfScore >= 65));
-  // The lesson is scoped to 15m: Supertrend signals on other timeframes are never attributed to it.
-  assert.ok(skipped.some((b) => b.strategy === "supertrend" && b.timeframe !== "15m" && b.reason !== "lesson"), "other timeframes are unaffected");
-  // Each check's own result and the threshold used are stored with the trade (weight-0 checks become learnable).
-  // (The aggressive accounts are not behind the confluence gate or on probation: their playbook decides. See bot-aggro-db.test.ts.)
-  assert.ok(trades.filter((t) => t.strategy !== "aggro").every((t) => {
-    const ind = t.entry_indicators as Record<string, number>;
-    return ind.cfMin === 65 && Object.keys(ind).some((k) => k.startsWith("cf_")) && typeof ind.convMult === "number";
-  }));
-
-  // Probation: 5m–30m setups start shadow-only — zero trades, but their signals are kept with reason 'probation'.
-  // The retired higher-timeframe setups are held shadow-only by the engine too, before any analysis run has set their flag.
-  const shortTf = (tf: unknown) => ["5m", "15m", "30m"].includes(tf as string);
-  const retired = (x: { strategy?: unknown; timeframe?: unknown }) => shortTf(x.timeframe) || isRetired(x.strategy as string, x.timeframe as string);
-  assert.equal(trades.filter((t) => shortTf(t.timeframe) && t.strategy !== "aggro").length, 0, "a probation setup must not trade");
-  assert.equal(trades.filter(retired).length, 0, "a retired setup must not trade");
-  const probation = skipped.filter((b) => b.reason === "probation");
-  assert.ok(probation.length > 0, "probation setups should have logged shadow signals");
-  assert.ok(probation.some((b) => !shortTf(b.timeframe)), "retired 1h/4h setups log shadow signals too");
-  assert.ok(probation.every((b) => retired(b) && b.lesson_ids.length === 0 && typeof b.features.confluence === "number"));
-  // Probation runs after the gates, so its shadows measure entries that would really have been traded.
-  assert.ok(probation.every((b) => (b.features.confluence as number) >= 65));
-
   // The outage was logged as missed bars, not traded late.
   const missed = (await pg.query(`select count(*)::int n from public.bot_events where kind = 'missed_bar'`)).rows[0] as { n: number };
   assert.ok(missed.n > 0);
-  const opensDuringOutage = trades.filter((t) => {
-    const o = new Date(t.opened_at as string).getTime() / 1000;
-    return o > outage[0] && o < outage[1];
-  });
-  assert.equal(opensDuringOutage.length, 0);
+  assert.equal(trades.filter((t) => sec(t.opened_at) > outage[0] && sec(t.opened_at) < outage[1]).length, 0);
 
   // Every open/close produced a journal event.
   const ev = (await pg.query<{ kind: string; n: number }>(`select kind, count(*)::int n from public.bot_events group by kind`)).rows;
   const count = (k: string) => ev.find((e) => e.kind === k)?.n ?? 0;
   assert.equal(count("opened"), trades.length);
-  assert.equal(count("placed"), 0, "no resting orders with maker entries off");
   assert.equal(count("closed"), closed.length);
   assert.equal(count("error"), 0);
 
@@ -179,6 +205,40 @@ test("bot engine: ticks over 4 simulated days keep the books exact", { timeout: 
   await runTick({ market, db, now: () => nowMs });
   const after = (await pg.query(`select count(*)::int n from public.bot_trades`)).rows[0] as { n: number };
   assert.equal(after.n, before.n);
+
+  // Bots switched off: open trades are still managed, nothing new is opened.
+  await pg.query(`update public.bot_settings set enabled = false`);
+  nowMs += 3600_000;
+  const off = await runTick({ market, db, now: () => nowMs });
+  assert.equal(off.opened, 0);
+  assert.equal(off.signals, 0);
+  await pg.query(`update public.bot_settings set enabled = true`);
+
+  // ── The reset script: everything goes, and the next run starts 15 fresh $100 accounts. ──
+  // Leftovers of the older versions, as a deployed database has them.
+  await pg.exec(`
+    insert into public.bot_strategies (key, name, version, summary, rules) values ('ema_trend', 'Old', 1, 's', 'r');
+    insert into public.bot_accounts (user_id, strategy, timeframe, balance, start_balance) values ('${USER}', 'ema_trend', '5m', 37, 100);
+    alter table public.bot_accounts add column probation boolean not null default false, add column playbook jsonb;
+    create table public.bot_lessons (id int primary key, strategy text references public.bot_strategies on delete cascade);
+    create table public.bot_filtered_signals (id int primary key);
+  `);
+  await pg.exec(readFileSync(new URL("../../supabase/bot_reset.sql", import.meta.url), "utf8"));
+  for (const table of ["bot_accounts", "bot_trades", "bot_events", "bot_cursors", "bot_reports", "bot_strategies"])
+    assert.equal(((await pg.query(`select count(*)::int n from public.${table}`)).rows[0] as { n: number }).n, 0, `${table} is not empty after the reset`);
+  const left = (await pg.query<{ table_name: string }>(`select table_name from information_schema.tables where table_schema = 'public' and table_name in ('bot_lessons', 'bot_filtered_signals', 'bot_pending_entries', 'bot_news')`)).rows;
+  assert.deepEqual(left, [], "the old learning tables are dropped");
+  const cols = (await pg.query<{ column_name: string }>(`select column_name from information_schema.columns where table_schema = 'public' and table_name = 'bot_accounts'`)).rows.map((r) => r.column_name);
+  assert.ok(!cols.includes("probation") && !cols.includes("playbook") && cols.includes("verdict"));
+  assert.equal(((await pg.query(`select count(*)::int n from public.bot_settings`)).rows[0] as { n: number }).n, 1, "the owner's settings are kept");
+
+  nowMs += 300_000;
+  const fresh = await runTick({ market, db, now: () => nowMs });
+  assert.deepEqual(fresh.errors, []);
+  const again = (await pg.query<{ strategy: string; timeframe: string; balance: string; status: string }>(`select strategy, timeframe, balance, status from public.bot_accounts`)).rows;
+  assert.equal(again.length, 15);
+  assert.ok(again.every((a) => +a.balance <= 100 && a.status === "active" && STRATEGY_BY_KEY[a.strategy]));
+  assert.equal(((await pg.query(`select count(*)::int n from public.bot_strategies`)).rows[0] as { n: number }).n, 5);
 });
 
 test("bot engine: lock, permissions and row-level security", async () => {

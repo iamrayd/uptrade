@@ -1,5 +1,4 @@
-import type { Candle, ExitReason, Side, Timeframe } from "./types.ts";
-import { TF_SECONDS } from "./types.ts";
+import type { Candle, ExitReason, Side } from "./types.ts";
 
 // Same numbers as the UpTrade engine (supabase/schema.sql, src/lib/pnl.ts).
 export const MMR = 0.005;
@@ -8,10 +7,10 @@ export const MAKER_FEE = 0;
 /** Smallest order notional we'll place (Binance's spot minimum is $5). */
 export const MIN_NOTIONAL = 5;
 /**
- * Never take a stop tighter than this, as a fraction of price. Fees are a fixed share of the price, so
+ * Never trade a stop tighter than this, as a fraction of price. Fees are a fixed share of the price, so
  * the closer the stop, the bigger the share of the risk they eat. On a year of history (20,000 trades),
- * stops under 0.2% of price averaged −0.19R, 0.2–0.4% −0.07R, and everything wider about 0R. It was
- * 0.15%; at 0.4% the same trades average 0.018R better, in both halves of the year.
+ * stops under 0.2% of price averaged −0.19R, 0.2–0.4% −0.07R, and everything wider about 0R.
+ * A signal with a tighter stop is not dropped: planEntry widens its stop to this.
  */
 export const MIN_STOP_PCT = 0.004;
 /** The liquidation price must be at least this many stop-distances away from entry. */
@@ -66,11 +65,9 @@ export function sizePosition(a: {
   freeBalance: number;
   stepSize: number;
   settings: RiskSettings;
-  /** Fee on the entry fill: taker for a market order (the default), MAKER_FEE for a resting limit. */
-  entryFeeRate?: number;
 }): SizedOrder | { skip: string } {
   const { side, entry, stop, equity, freeBalance, stepSize, settings } = a;
-  const entryFeeRate = a.entryFeeRate ?? TAKER_FEE;
+  const entryFeeRate = TAKER_FEE;
   const dist = side === "long" ? entry - stop : stop - entry;
   if (!(dist > 0)) return { skip: `Stop ${stop} is on the wrong side of the entry ${entry}.` };
   const stopPct = dist / entry;
@@ -128,37 +125,29 @@ export function sizePosition(a: {
   };
 }
 
-// ───────────────────────── Maker entries ─────────────────────────
-// An entry can be a limit order resting at the signal bar's close instead of a market order: no
-// taker fee and no slippage on the way in. The price paid for that is the entries that never
-// fill, which are the ones that ran away at once.
-//
-// It is built and tested but OFF by default. Replayed on a year of 1-minute candles with the
-// live fill rules (scripts/experiments/v2-validate.ts, FINE=1m), the two cancel out: 16 setups
-// made +98.5R with market entries at 0.05% slippage and +87.9R with maker entries (92% of the
-// orders filled). No measured gain, so the simpler behaviour stays. Maker entries win only if
-// real slippage is well above 0.05% per side.
-
-export const ENTRY = {
-  /** Enter with a resting limit at the signal close. False: market orders. */
-  maker: false,
-  /** The order lapses after this share of the bar, within the bounds below. */
-  timeoutBarShare: 0.25,
-  timeoutMinMs: 2 * 60_000,
-  timeoutMaxMs: 60 * 60_000,
-};
-
-/** How long a resting entry waits before it is cancelled. */
-export function makerTimeoutMs(tf: Timeframe) {
-  return Math.min(ENTRY.timeoutMaxMs, Math.max(ENTRY.timeoutMinMs, ENTRY.timeoutBarShare * TF_SECONDS[tf] * 1000));
-}
-
 /**
- * True when the candle traded THROUGH the limit. A touch is not counted: at the touch the
- * order may still be queued behind others, and counting it would flatter the fill rate.
+ * Turns a signal into an order at the price it will fill at. Used by the live engine and the
+ * backtester, so both trade the same stop and target.
+ *  - A stop tighter than MIN_STOP_PCT is widened to it, and the target is moved out by the same
+ *    factor so the trade keeps its reward-to-risk. The signal is still traded.
+ *  - The stop is rounded away from price and the target to the nearest tick.
+ *  - Skipped only when the price has already passed the stop or the target: there is no trade left.
  */
-export function limitFilled(side: Side, limit: number, c: Candle) {
-  return side === "long" ? c.low < limit : c.high > limit;
+export function planEntry(a: { side: Side; entry: number; stop: number; takeProfit: number | null; tick: number }): { stop: number; takeProfit: number | null; note: string | null } | { skip: string } {
+  const sign = a.side === "long" ? 1 : -1;
+  const dist = sign * (a.entry - a.stop);
+  if (!(dist > 0)) return { skip: `the price ${a.entry} is already through the stop ${a.stop}.` };
+  if (a.takeProfit != null && sign * (a.takeProfit - a.entry) <= 0) return { skip: `the price ${a.entry} already reached the target ${a.takeProfit}.` };
+  let stop = a.stop;
+  let takeProfit = a.takeProfit;
+  let note: string | null = null;
+  const min = a.entry * MIN_STOP_PCT * 1.001;
+  if (dist < min) {
+    stop = a.entry - sign * min;
+    if (takeProfit != null) takeProfit = a.entry + ((takeProfit - a.entry) * min) / dist;
+    note = `The rule's stop was ${((dist / a.entry) * 100).toFixed(3)}% away, under the ${(MIN_STOP_PCT * 100).toFixed(1)}% minimum (fees would dominate). Stop widened to the minimum${takeProfit != null ? " and the target moved out to keep the same reward-to-risk" : ""}.`;
+  }
+  return { stop: roundStop(a.side, stop, a.tick), takeProfit: takeProfit == null ? null : toTick(takeProfit, a.tick, "nearest"), note };
 }
 
 export interface LiveTrade {
@@ -219,23 +208,6 @@ export function closeMath(a: { side: Side; entry: number; exit: number; qty: num
     fee = a.margin + pnl;
   }
   return { pnl, fee };
-}
-
-/**
- * Breakeven stop once a trade has reached +1R: entry nudged in the trade's favour by enough to
- * cover both taker fees, so a stop-out from here is a true scratch. Goes through tighterStop,
- * so it only ever tightens the stop and a strategy's own trailing stop can still be tighter.
- */
-export function breakevenStop(side: Side, entry: number) {
-  return side === "long" ? entry * (1 + 2 * TAKER_FEE) : entry * (1 - 2 * TAKER_FEE);
-}
-
-/** True when the trade's best excursion has reached +`r`R of the given (initial) stop distance. */
-export function reachedR(side: Side, entry: number, initialStop: number, bestPrice: number | null, r = 1) {
-  if (bestPrice == null) return false;
-  const risk = Math.abs(entry - initialStop);
-  if (!(risk > 0)) return false;
-  return (side === "long" ? bestPrice - entry : entry - bestPrice) >= r * risk;
 }
 
 /** Only accept a new stop if it is meaningfully tighter (moves in the trade's favour) than the current one. */

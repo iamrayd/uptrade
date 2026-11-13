@@ -28,7 +28,7 @@ const gauss = (r: () => number) => (r() + r() + r() + r() + r() + r() - 3) / Mat
 
 /**
  * Regime-switching random walk of 1m candles: trends and chop alternate every
- * few hours, so every strategy gets signals. startSec must be minute-aligned.
+ * few hours, so every rule set gets signals. startSec must be minute-aligned.
  */
 export function syntheticMinutes(seed: number, startSec: number, minutes: number, startPrice: number): Candle[] {
   const r = rng(seed);
@@ -147,15 +147,10 @@ export function pgDb(pg: PGlite): Db {
     getState: () => call("select public.bot_get_state() r", []),
     setCursor: async (k, t) => void (await call("select public.bot_set_cursor($1, $2::timestamptz) r", [k, t])),
     openTrade: (p) => call("select public.bot_open_trade($1::jsonb) r", [j(p)]),
-    placeEntry: async (p) => void (await call("select public.bot_place_entry($1::jsonb) r", [j(p)])),
-    cancelEntries: async (ids) => void (ids.length && (await call("select public.bot_cancel_entries($1::uuid[]) r", [ids]))),
     closeTrade: (a) =>
       call("select public.bot_close_trade($1::uuid, $2::numeric, $3, $4::numeric, $5::timestamptz, $6) r", [a.id, a.price, a.reason, a.feeRate, a.at, a.note]),
     updateTrades: async (u) => void (u.length && (await call("select public.bot_update_trades($1::jsonb) r", [j(u)]))),
     log: async (e) => void (e.length && (await call("select public.bot_log($1::jsonb) r", [j(e)]))),
-    logFiltered: async (f) => void (f.length && (await call("select public.bot_log_filtered($1::jsonb) r", [j(f)]))),
-    savePlaybook: async (p) => void (await call("select public.bot_save_playbook($1::jsonb) r", [j(p)])),
-    redeploy: (id, at) => call("select public.bot_redeploy($1::uuid, $2::timestamptz) r", [id, at]),
   };
 }
 
@@ -170,10 +165,8 @@ export function pgAnalysisDb(pg: PGlite): AnalysisDb {
   return {
     state: () => call("select public.bot_analysis_state() r", []),
     saveReviews: async (r) => void (r.length && (await call("select public.bot_save_reviews($1::jsonb) r", [j(r)]))),
-    resolveSignals: async (r) => void (r.length && (await call("select public.bot_resolve_signals($1::jsonb) r", [j(r)]))),
-    saveLessons: async (r) => void (r.length && (await call("select public.bot_save_lessons($1::jsonb) r", [j(r)]))),
     saveReport: async (r) => void (await call("select public.bot_save_report($1::jsonb) r", [j(r)])),
-    tuneAccounts: async (r) => void (r.length && (await call("select public.bot_tune_accounts($1::jsonb) r", [j(r)]))),
+    saveVerdicts: async (r) => void (r.length && (await call("select public.bot_save_verdicts($1::jsonb) r", [j(r)]))),
   };
 }
 

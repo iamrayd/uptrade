@@ -30,7 +30,7 @@ select cron.schedule(
   $$
 );
 
--- Hourly, a few minutes past the hour: trade reviews, learning and reports (needs the
+-- Hourly, a few minutes past the hour: trade reviews, rankings and reports (needs the
 -- bot-analyze function deployed, see docs/strategies/ANALYSIS.md).
 select cron.schedule(
   'uptrade-bot-analyze',
@@ -44,24 +44,6 @@ select cron.schedule(
     ),
     body := '{}'::jsonb,
     timeout_milliseconds := 150000
-  );
-  $$
-);
-
--- Every 10 minutes: read crypto headlines + the Fear & Greed index for the "+ News" bots (needs the
--- bot-news function deployed, see docs/strategies/NEWS.md). Without it, those bots trade on indicators alone.
-select cron.schedule(
-  'uptrade-bot-news',
-  '*/10 * * * *',
-  $$
-  select net.http_post(
-    url := 'https://<PROJECT_REF>.supabase.co/functions/v1/bot-news',
-    headers := jsonb_build_object(
-      'Content-Type', 'application/json',
-      'x-bot-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'bot_cron_secret')
-    ),
-    body := '{}'::jsonb,
-    timeout_milliseconds := 60000
   );
   $$
 );

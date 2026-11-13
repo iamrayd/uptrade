@@ -1,6 +1,6 @@
 "use client";
 
-import type { BotAccount, BotEvent, BotLesson, BotReport, BotReportKind, BotRuntime, BotSettings, BotStrategy, BotTrade } from "@/lib/types";
+import type { BotAccount, BotEvent, BotReport, BotReportKind, BotRuntime, BotSettings, BotStrategy, BotTrade } from "@/lib/types";
 import { unwrap, useQuery } from "./useQuery";
 
 export interface BotsOverview {
@@ -41,7 +41,7 @@ export function useBotsOverview() {
       sb.from("bot_accounts").select("*").then(unwrap),
       sb.from("bot_trades").select("*").eq("status", "open").then(unwrap),
       fetchClosed(sb, CLOSED_COLS, 20000),
-      sb.from("bot_events").select("*").in("kind", ["opened", "closed", "error"]).order("created_at", { ascending: false }).limit(40).then(unwrap),
+      sb.from("bot_events").select("*").in("kind", ["opened", "closed", "skipped", "error"]).order("created_at", { ascending: false }).limit(80).then(unwrap),
     ]);
     return {
       settings: settings as BotSettings | null,
@@ -60,20 +60,23 @@ export interface BotAccountData {
   strategy: BotStrategy | null;
   trades: BotTrade[];
   events: BotEvent[];
+  /** The same rule set's accounts on every timeframe (this one included), for switching between them. */
+  siblings: Pick<BotAccount, "id" | "timeframe">[];
 }
 
 export function useBotAccount(accountId: string) {
   return useQuery<BotAccountData>(`bots:account:${accountId}`, async (sb) => {
     const account = (await sb.from("bot_accounts").select("*").eq("id", accountId).maybeSingle().then(unwrap)) as BotAccount | null;
-    if (!account) return { account: null, strategy: null, trades: [], events: [] };
-    const [strategy, openTrades, closed, events] = await Promise.all([
+    if (!account) return { account: null, strategy: null, trades: [], events: [], siblings: [] };
+    const [strategy, openTrades, closed, events, siblings] = await Promise.all([
       sb.from("bot_strategies").select("*").eq("key", account.strategy).maybeSingle().then(unwrap),
       sb.from("bot_trades").select("*").eq("account_id", accountId).eq("status", "open").then(unwrap),
       fetchClosed(sb, "*", 5000, accountId),
       sb.from("bot_events").select("*").eq("account_id", accountId).order("created_at", { ascending: false }).limit(60).then(unwrap),
+      sb.from("bot_accounts").select("id, timeframe").eq("strategy", account.strategy).then(unwrap),
     ]);
     const trades = [...((openTrades ?? []) as BotTrade[]), ...closed].sort((x, y) => +new Date(y.opened_at) - +new Date(x.opened_at));
-    return { account, strategy: strategy as BotStrategy | null, trades, events: (events ?? []) as BotEvent[] };
+    return { account, strategy: strategy as BotStrategy | null, trades, events: (events ?? []) as BotEvent[], siblings: (siblings ?? []) as BotAccountData["siblings"] };
   });
 }
 
@@ -91,17 +94,15 @@ export interface BotInsights {
   strategies: BotStrategy[];
   /** The latest report of each kind. */
   reports: Partial<Record<BotReportKind, BotReport>>;
-  lessons: BotLesson[];
 }
 
 const REPORT_KINDS: BotReportKind[] = ["hourly", "daily", "weekly", "monthly"];
 
 export function useBotInsights() {
   return useQuery<BotInsights>("bots:insights", async (sb) => {
-    const [settings, strategies, lessons, ...latest] = await Promise.all([
+    const [settings, strategies, ...latest] = await Promise.all([
       sb.from("bot_settings").select("*").maybeSingle().then(unwrap),
       sb.from("bot_strategies").select("key, name, version, summary").then(unwrap),
-      sb.from("bot_lessons").select("*").order("created_at", { ascending: false }).then(unwrap),
       ...REPORT_KINDS.map((k) => sb.from("bot_reports").select("*").eq("kind", k).order("period_start", { ascending: false }).limit(1).maybeSingle().then(unwrap)),
     ]);
     const reports: BotInsights["reports"] = {};
@@ -112,7 +113,6 @@ export function useBotInsights() {
       settings: settings as BotSettings | null,
       strategies: (strategies ?? []) as BotStrategy[],
       reports,
-      lessons: (lessons ?? []) as BotLesson[],
     };
   });
 }

@@ -1,115 +1,88 @@
 # UpTrade strategy bots
 
-Five widely used crypto strategies, trailing-exit (v2) variants of two of them and news-aware twins of three of them, each tested on six timeframes, run around the clock against live Binance prices. Every **strategy × timeframe** pair is its own **$100 paper account** (60 accounts), so the results can be compared fairly. Two [aggressive accounts](#aggressive-accounts) trade the signals of all of them with a learned playbook. Not every account trades with capital: see [Retired setups](#retired-setups).
+Five rule sets, each on three timeframes, run around the clock against live Binance prices. Every **rule set × timeframe** pair is its own **$100 paper account** (15 accounts), so the results can be compared fairly. **Every signal a rule set gives is traded**: nothing scores, filters or holds back an entry.
 
-| Strategy | Type | Entry | Exit | Doc |
+| Rule set | Type | Entry | Exit | Doc |
 |---|---|---|---|---|
-| EMA Trend Cross | Trend following | EMA 9/21 cross with the 200 EMA | 1.5×ATR stop, 2R target, opposite cross | [ema_trend.md](ema_trend.md) |
-| Bollinger + RSI Reversion | Mean reversion | Close back inside a 2σ band after an RSI extreme | Stop beyond the swing, target the middle band, 24-bar time stop | [bb_rsi.md](bb_rsi.md) |
-| Donchian Breakout | Breakout | 20-bar high/low break with 1.5× volume | 2×ATR stop, then trails the 10-bar channel | [donchian.md](donchian.md) |
-| MACD Momentum + ADX | Momentum | MACD/signal cross with ADX ≥ 25 and the DMI agreeing | 1.5×ATR stop, 2R target, opposite cross | [macd_adx.md](macd_adx.md) |
-| Supertrend Flip | Trend following | Supertrend(10, 3) flip with ADX ≥ 20 | The Supertrend line as the trailing stop | [supertrend.md](supertrend.md) |
-| EMA Trend Cross **v2** | Trend following | Same as EMA Trend Cross | 1.5×ATR stop, then a 3×ATR chandelier trail. No target, no exit on the opposite cross | [ema_trend_v2.md](ema_trend_v2.md) |
-| MACD Momentum + ADX **v2** | Momentum | Same as MACD + ADX | 1.5×ATR stop, then a 3×ATR chandelier trail. No target, no exit on the opposite cross | [macd_adx_v2.md](macd_adx_v2.md) |
-| MACD Momentum + ADX **+ News** | As MACD + ADX | Same trigger, but waits out fresh high-impact crypto news and doesn't trade against one-sided news | Same as MACD + ADX | [macd_adx_news.md](macd_adx_news.md) |
-| Donchian Breakout **+ News** | As Donchian | As above | Same as Donchian | [donchian_news.md](donchian_news.md) |
-| Supertrend Flip **+ News** | As Supertrend | As above | Same as Supertrend | [supertrend_news.md](supertrend_news.md) |
+| Fair Value Gap | ICT, trend | First retrace into a displacement gap, with the 200 EMA | Stop beyond the gap, 2R target | [fvg.md](fvg.md) |
+| Order Block | ICT, structure | First retest of the last opposite candle before a break of structure | Stop beyond the block, 2R target | [order_block.md](order_block.md) |
+| Bollinger + RSI Reversion | Mean reversion | Close back inside a 2σ band after an RSI extreme | Stop beyond the swing, target the middle band, 24-bar time stop | [bb_rsi_reversion.md](bb_rsi_reversion.md) |
+| EMA Pullback | Trend following | First dip to the 20 EMA in a 20/50 EMA trend | Stop beyond the wick, 2R target | [ema_pullback.md](ema_pullback.md) |
+| Donchian Breakout | Breakout | 20-bar high/low break with 1.5× volume | 2×ATR stop, then trails the 10-bar channel | [donchian_breakout.md](donchian_breakout.md) |
 
-How the entry gate, the stop floor and the risk cuts were chosen, and what a year of history says they achieve (and don't), is in [EVIDENCE.md](EVIDENCE.md). The news twins are explained in [NEWS.md](NEWS.md). Each is a separate track record next to its original, so the two can be compared on the same timeframe.
+Why these five, what a year of history says about them, and how to read the trial: [V3.md](V3.md). The short version is that none of them has a proven edge after realistic costs, and the trial is there to find out which are worth keeping.
 
-**Timeframes:** 5m, 15m, 30m, 1h, 4h and 1d for every strategy. **Coins:** BTCUSDT, ETHUSDT and SOLUSDT. Each account holds at most one position per coin.
+**Timeframes:** 15m, 1h and 4h for every rule set. **Coins:** BTCUSDT, ETHUSDT and SOLUSDT. Each account holds at most one position per coin.
 
-The rules in each doc are generated from the code the bot runs (`npm run docs:strategies`), so they can't drift apart. Changes I made to the textbook versions are marked **Modification** in each doc, with the reason.
+The rules in each doc are generated from the code the bot runs (`npm run docs:strategies`), so they can't drift apart.
 
-## Risk management shared by every strategy
+## Risk management shared by every rule set
 
-Settings live in the `bot_settings` table. The defaults are the ones we agreed on:
+Settings live in the `bot_settings` table.
 
 | Rule | Value |
 |---|---|
 | Starting balance | $100 per account |
-| Risk per trade | **2% of the account's equity**, measured from entry to stop and **including both fees** |
+| Risk per trade | **2% of the account's equity**, measured from entry to stop and **including both fees**. The same for every trade: no scaling up or down. |
 | Leverage | the **lowest** that fits, **20x max**. It's also capped so the liquidation price sits at least 1.5× the stop distance beyond entry, so the stop is always hit first. |
 | Margin per trade | at most ⅓ of equity (one slot per coin). If that can't carry the full 2% risk, the size shrinks rather than the leverage rising. |
-| Minimum stop distance | **0.4%** of price (was 0.15%). Tighter stops are skipped, because fees would eat too much of the risk: on a year of history, stops under 0.2% averaged −0.19R per trade and 0.2–0.4% averaged −0.07R. |
+| Minimum stop distance | **0.4%** of price. A rule's stop that is closer is **widened to 0.4%** and its target moved out by the same factor, so the reward-to-risk stays the same. The trade is still taken. (Fees are a fixed share of price: on a year of history, stops under 0.2% averaged −0.19R per trade.) |
 | Minimum order | $5 notional |
-| Fees | as MEXC futures and the UpTrade engine: taker 0.02% on market and stop fills, maker 0% on take-profit limits |
-| Entries | market orders (taker). Limit-order entries at the signal bar's close are built (`ENTRY.maker` in `risk.ts`) but **off**: on a year of 1-minute candles they made no more than market entries, because the orders that never fill are the trades that ran away at once ([V2-PLAN.md](V2-PLAN.md)). |
-| Busted | below $10 of equity, the account stops opening trades. It still sees every signal and replays it, so it keeps learning. |
-| Smaller risk while losing | 50% of the normal risk once the account is 30% below its start (25% at 60% below), after 3 losses in a row, or when the last 6+ trades averaged worse than −0.3R. Full size again once it recovers. Not on 1d. |
-| Patience | A signal must score **65/100 or more** on the confluence gate (most confirming indicators agree, weighted by what a year of history showed predicts a good entry). After a loss on a coin the bot waits 3 bars there; after 3 losses in a row, 6 bars everywhere (1 and 2 bars on 4h, no wait on 1d). See [ANALYSIS.md](ANALYSIS.md#3-learning-how-the-bots-improve). |
+| Fees | taker 0.02% on market and stop fills, maker 0% on take-profit limits |
+| Entries | market orders (taker) |
+| Busted | below $10 of equity, the account stops opening trades |
 
-**Why 2% and not more?** The stretch goal is $100 → $500 in a month (+400%). No honest risk setting gets there reliably. At 2%, ten losses in a row cost about 18%, so the month produces real data on which strategies work instead of 30 blown accounts. The goal tracker on the Bots page shows how close the best account gets.
+## When a signal is not opened
 
-## Retired setups
+Only when it cannot be. Each case is written to the bot log as `skipped`, with the reason:
 
-A year replay of the live configuration with 0.05% slippage per side ([V2-PLAN.md](V2-PLAN.md)) showed no edge after costs on most setups. These get **no capital**. They stay shadow-only: their signals are logged and replayed, so the record keeps growing, but no replay record promotes them.
-
-- every strategy on **5m, 15m and 30m**
-- **EMA Trend 1h, Donchian 1h, Supertrend 1h, MACD + ADX 4h, Supertrend 4h** (negative in both halves of the year), and their news twins
-
-The list lives in `tuning.ts` (`RETIRED`). The v2 strategies are new rule sets, so only the short timeframes are closed to them.
-
-## Aggressive accounts
-
-Two more $100 accounts, **Aggressive 15m** and **Aggressive 1h** ([aggro.md](aggro.md)), work differently from all the others. They own no rule set. On every bar they see the signals of all seven plain rule sets and a learned **playbook** decides which one to take and how much to risk on it: up to 10% of equity per trade, against 2% for the ordinary bots. They aim for +10% a day, they can bust, and that is accepted.
-
-- **Playbook.** Every signal is described by its context (rule set, side, coin, higher-timeframe trend, confluence band, volatility, trend strength, side of EMA 200, session). The playbook keeps the average result in R of every signal it has seen in each context, traded or not: untraded signals are replayed by the analyzer, so the account learns from all of them. A new account starts from a replay of the past year (`aggro-seed.ts`).
-- **Calibration.** The playbook also checks its own estimates against what the signals then did, and trades on the corrected number. The slope of that correction is learned, sign included: if well-rated contexts keep doing worse (a move that has paid is often spent), it bets against the record.
-- **Day target.** No new entries for the rest of the UTC day once the account is up 10% or down 15% on the day.
-- **Lives.** Under $10 the account is busted. **Redeploy** on the account's page ends the current life and starts the next at $100 with the playbook kept; the next bot run closes what is open, writes the life's post-mortem and starts it. The losing trades between a life's peak and its end are learned a second time.
-- The confluence gate, the cooldown, lessons, probation and the retired list do not apply to them, and the per-setup tuner leaves them alone.
-
-**What a year of history says** (`scripts/experiments/aggro-replay.ts`, output in `aggro-replay.out.txt`; 0.05% slippage per taker fill, the playbook learning as it goes, so every decision is out of sample):
-
-| | Signals seen | On their own | Trades taken | Per trade | $100 after the year | Days at +10% or more |
-|---|---:|---:|---:|---:|---:|---:|
-| Aggressive 15m | 15,603 | −0.198R | 0 | — | $100.00 | 0 |
-| Aggressive 1h | 4,027 | −0.015R | 111 | −0.029R | $58.58 | 4 |
-
-The honest reading: there is no edge in these rule sets on 15m after costs, and the playbook learns that and stops trading there. On 1h it trades rarely and loses slowly. Its estimate does not sort good signals from bad ones in the replay. **+10% a day is the aim, not something the data supports.** Without calibration (`AGGRO.calibration = false`) the accounts trade more and lose more: about −$41 on 15m, and −$118 on 1h with one bust, over the same year (`scripts/experiments/aggro-variants.ts`, output in `aggro-variants.out.txt`). In that mode the signals the record rated best did worse than the ones it rated worst, on 15m, 1h and 4h alike.
+- **the account already holds that coin** (one position per coin; the open trade is managed, no log line),
+- **busted**: the account is under $10,
+- **stale**: by the time the order is placed, the price is already past the signal's stop or target,
+- **sizing**: the position would be under $5, or the account has no free balance for the margin.
 
 ## How a trade is executed
 
-1. **Signal.** Every minute, the runner checks which timeframes just closed a bar. Strategies only see **closed** bars, so signals never repaint. A signal then has to pass the confluence gate, the news gate (news twins only), the cooldown and the active lessons. A signal that doesn't is stored with the reason and replayed later as learning data.
+1. **Signal.** Every minute, the runner checks which timeframes just closed a bar. Rule sets only see **closed** bars (the last 600), so signals never repaint.
 2. **Fresh only.** A bar is acted on only if the runner sees it within max(3 min, 10% of the bar) after the close. After downtime, late bars are logged as *missed*, not traded at a stale price.
-3. **Entry** fills at the current market price (taker fee). Stops round away from price to the exchange tick, and targets round to the nearest tick. With `ENTRY.maker` on (off by default), the entry is instead a limit order resting at the signal bar's close, or at the current price when that is already better. It fills when a closed 1-minute candle trades **through** the limit (a touch is not counted), at the limit price and with no fee. If that does not happen within a quarter of the bar (at least 2 minutes, at most 1 hour), the order is cancelled and the signal is kept as an `unfilled` shadow signal.
+3. **Entry** fills at the current market price (taker fee). The stop is widened if it is under the minimum, then rounded away from price to the exchange tick; the target rounds to the nearest tick.
 4. **Stops, targets and liquidations** are checked against every closed **1-minute** candle since the last check:
    - a candle that opens past the stop fills at the open (slippage)
    - when one candle touches both the stop and the target, the **stop is assumed first** (conservative)
    - after downtime, the runner replays up to ~7 days of 1m candles in time order
-5. **Management** at each bar close: trailing stops only ever tighten. Signal exits and time stops close at market.
+5. **Management** at each bar close: trailing stops only ever tighten. Time stops close at market.
 6. **Journal.** Each trade stores:
-   - the reason for the entry and the indicator readings on the signal bar
-   - the sizing maths (risk $, stop %, why that leverage)
+   - the reason for the entry and the readings on the signal bar (the gap or block edges, the swing that broke, ATR)
+   - the sizing maths (risk $, stop %, why that leverage, whether the stop was widened)
    - every stop move
    - best and worst price (MFE/MAE, in R)
    - the exit reason with the exact 1m candle that triggered it
    - net PnL and the R multiple
 
-   The trade page adds a chart with the strategy's indicators and a one-line review.
+   The trade page adds a chart and a review.
 
 ## Where things are
 
 | Piece | File |
 |---|---|
-| Strategies (entry and management rules) | `supabase/functions/_shared/bot/strategies.ts` |
-| Indicators (EMA/RSI/BB/MACD match the chart; ATR, DMI/ADX and Supertrend follow TradingView's definitions) | `supabase/functions/_shared/bot/indicators.ts` |
-| Sizing, leverage, liquidation, fills | `supabase/functions/_shared/bot/risk.ts` |
-| Confluence gate (indicators that must agree, next-timeframe trend) | `supabase/functions/_shared/bot/confluence.ts` |
-| Cooldown and smaller risk while losing | `supabase/functions/_shared/bot/discipline.ts` |
-| Crypto news: feeds, scoring, the news gate | `supabase/functions/_shared/bot/news.ts`, `supabase/functions/bot-news/index.ts` |
-| Learning: mistake tags, lessons, replays | `supabase/functions/_shared/bot/analysis.ts`, `analyze.ts` |
+| Rule sets (entry and management rules) | `supabase/functions/_shared/bot/strategies.ts` |
+| Market structure: swings, breaks, fair value gaps, order blocks, levels, candle patterns | `supabase/functions/_shared/bot/structure.ts` |
+| Indicators (EMA/RSI/BB/MACD match the chart; ATR and DMI/ADX follow TradingView's definitions) | `supabase/functions/_shared/bot/indicators.ts` |
+| Entry planning, sizing, leverage, liquidation, fills | `supabase/functions/_shared/bot/risk.ts` |
 | The per-minute run | `supabase/functions/_shared/bot/tick.ts` |
-| Edge function entry | `supabase/functions/bot-tick/index.ts` |
+| Reviews, statistics, reports (measures only) | `supabase/functions/_shared/bot/analysis.ts`, `analyze.ts` |
+| Edge function entries | `supabase/functions/bot-tick`, `bot-analyze`, `bot-chat` |
 | Tables, RLS and atomic accounting (service-role only) | `supabase/bot.sql` |
+| Full reset | `supabase/bot_reset.sql` |
 | Cron schedule | `supabase/bot_cron.sql` |
 | Dashboard | `src/app/(app)/bots/**` |
-| Backtester (same strategy, gate and risk code; slippage, maker entries, R and $ reported separately) | `supabase/functions/_shared/bot/backtest.ts`, `scripts/backtest.ts`, `scripts/gate-sweep.ts` |
-| Per-setup tuning and the retired list | `supabase/functions/_shared/bot/tuning.ts` |
-| The v2 evidence (year replay, older half vs newer half) | `scripts/experiments/v2-validate.ts`, [V2-PLAN.md](V2-PLAN.md) |
+| Backtester (same rule, entry-planning and risk code as live) | `supabase/functions/_shared/bot/backtest.ts`, `scripts/backtest.ts` |
+| The selection run | `scripts/experiments/v3-select.ts`, [V3.md](V3.md) |
 | Tests (unit, plus Postgres integration on PGlite) | `scripts/test/*.test.ts` (`npm run test:bot`) |
 
-## Changing or adding a strategy
+## Changing, adding or dropping a rule set
 
-Don't edit a running strategy in place, because that mixes two rule sets in one track record. Copy it under a new `key` (for example `ema_trend_v2`), add it to `STRATEGIES`, and deploy. The next run creates its 6 new $100 accounts automatically, alongside the original's. `ema_trend_v2` and `macd_adx_v2` were added this way.
+- **Change.** Don't edit a running rule set in place, because that mixes two rule sets in one track record. Copy it under a new `key` (for example `fvg_v2`), add it to `STRATEGIES`, and deploy `bot-tick`. The next run creates its three new $100 accounts alongside the original's.
+- **Add.** The other backtested rule sets are in `CANDIDATES` in the same file. Add one to `STRATEGIES` and deploy.
+- **Drop.** Remove it from `STRATEGIES` and deploy. Its accounts stop trading at once (open trades stay open until you close the test with a reset, so drop a rule set when it is flat, or accept that). Its history stays in the database.
+- **One timeframe only.** Give the rule set a `timeframes` list, for example `timeframes: ["1h", "4h"]`.

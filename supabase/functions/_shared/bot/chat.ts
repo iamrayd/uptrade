@@ -10,7 +10,6 @@ export interface ChatMessage {
 export interface ChatData {
   /** Latest report of each kind (any may be missing). */
   reports: { kind: string; period_start: string; period_end: string; created_at: string; data: Record<string, unknown>; narrative: unknown }[];
-  lessons: Record<string, unknown>[];
   /** Recent closed trades, newest first. */
   trades: Record<string, unknown>[];
   openTrades: Record<string, unknown>[];
@@ -21,13 +20,11 @@ export interface ChatData {
 export const MAX_TURNS = 12;
 export const MAX_QUESTION_CHARS = 2000;
 
-export const SYSTEM = `You are the analysis assistant inside UpTrade, a crypto paper-trading app. The owner runs strategy bots: 5 strategies plus news-aware twins of three of them (keys ending in _news), each on 6 timeframes, each a separate $100 paper account trading BTC/ETH/SOL, risking up to 2% per trade (less while an account is deeply down or on a losing streak). A signal is traded only when most confirming indicators agree (confluence score ≥ 65/100), the bot is not cooling down after a loss, and no active lesson blocks it; every signal not traded is replayed afterwards and counts as learning data. An hourly job reviews every closed trade, ranks the setups and learns "lessons" (entry filters). You answer the owner's questions about that analysis.
+export const SYSTEM = `You are the analysis assistant inside UpTrade, a crypto paper-trading app. The owner runs strategy bots: five rule sets (listed under "strategies" in the data), each on the 15m, 1h and 4h timeframes, each a separate $100 paper account trading BTC/ETH/SOL and risking 2% per trade. Every signal of a rule set is traded: there is no score, filter, cooldown or learning between a signal and an order. This is a 2 to 4 week trial; afterwards the owner drops the weak rule sets and improves the strong ones. An hourly job reviews every closed trade and ranks the setups. You answer the owner's questions about that analysis.
 
 Rules:
-- Answer only from the DATA below. Quote the numbers you use (trades, R, win rate, PF, drawdown, verdicts). If the data doesn't contain the answer, say so and say what would answer it. Never invent trades, statistics or lessons.
+- Answer only from the DATA below. Quote the numbers you use (trades, R, win rate, PF, drawdown, verdicts). If the data doesn't contain the answer, say so and say what would answer it. Never invent trades or statistics.
 - R = net PnL ÷ planned risk. "Slip" figures include an extra 0.05% slippage per side. lcbR is the 95% lower confidence bound of mean R. A setup needs 30+ trades and a positive lcbRSlip before its edge is more than luck; say so when a sample is small.
-- Lessons are learned on the oldest 70% of a setup's trades and must hold on the newest 30% plus a t-test; a lesson is retired if the signals it blocked would have made money. Few lessons early on is expected.
-- A lesson only affects entries opened after its activated_at. Trades opened before that are what it was learned from, not violations. Only call a trade a violation if it opened after activated_at and matches the rule, and then say the live bot (bot-tick) may need redeploying.
 - This is paper trading. Don't promise profits. You may say which setups look strongest for a small live test and why, with the caveats.
 - Be concise and direct: short paragraphs, "- " bullet lists, **bold** for key numbers. No headings, no tables, no code blocks.
 - Times in the data are UTC.`;
@@ -39,7 +36,7 @@ export function buildContext(d: ChatData, now = Date.now()): string {
   const byFresh = [...d.reports].sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
   const latest = byFresh[0];
   const allTime = latest
-    ? pick(latest.data, ["setups", "rankings", "timing", "learning"])
+    ? pick(latest.data, ["strategies", "setups", "rankings", "timing"])
     : null;
   const mistakes = latest ? (latest.data.mistakes as Record<string, unknown> | undefined) : undefined;
   return JSON.stringify({
@@ -56,12 +53,9 @@ export function buildContext(d: ChatData, now = Date.now()): string {
       worstLosers: (r.data.mistakes as Record<string, unknown> | undefined)?.examples,
       writeUp: r.narrative,
     })),
-    lessons: d.lessons.map((l) =>
-      pick(l, ["strategy", "timeframe", "title", "explanation", "status", "source", "blocked", "blocked_r", "retired_reason", "created_at", "activated_at"]),
-    ),
     recentClosedTrades: d.trades.map((t) => ({
       ...pick(t, ["strategy", "timeframe", "symbol", "side", "opened_at", "closed_at", "exit_reason", "r_multiple", "net_pnl", "entry_reason"]),
-      review: t.review ? pick(t.review as Record<string, unknown>, ["title", "why", "fix", "flags"]) : null,
+      review: t.review ? pick(t.review as Record<string, unknown>, ["title", "why", "fix"]) : null,
     })),
     openTrades: d.openTrades.map((t) => pick(t, ["strategy", "timeframe", "symbol", "side", "entry_price", "stop_price", "take_profit", "opened_at"])),
   });

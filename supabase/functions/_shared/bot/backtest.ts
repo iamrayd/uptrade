@@ -1,10 +1,8 @@
-import type { Candle, ExitReason, Side, StrategyDef, Timeframe } from "./types.ts";
-import { TF_SECONDS } from "./types.ts";
-import { confluence, passesGate } from "./confluence.ts";
-import { cooldownUntil, riskMultiplier, type RecentTrade } from "./discipline.ts";
-import { checkExit, closeMath, limitFilled, MAKER_FEE, roundStop, sizePosition, TAKER_FEE, tighterStop, toTick, type RiskSettings } from "./risk.ts";
+import type { Candle, ExitReason, Side, StrategyDef } from "./types.ts";
+import { checkExit, closeMath, MAKER_FEE, planEntry, roundStop, sizePosition, TAKER_FEE, tighterStop, type RiskSettings } from "./risk.ts";
 
-// Replays history through the SAME strategy and risk code the live bot uses.
+// Replays history through the SAME strategy and risk code the live bot uses: strategy.entry and
+// strategy.manage, planEntry, sizePosition, checkExit. Like the live bot it trades every signal.
 // Differences from live, all on the conservative side:
 //  - Stops/targets are checked on the strategy's own bars, not 1m bars, and when
 //    a bar touches both, the stop is assumed to fill first.
@@ -13,14 +11,11 @@ import { checkExit, closeMath, limitFilled, MAKER_FEE, roundStop, sizePosition, 
 //
 // Costs. Fees are always charged (taker 0.02%, maker 0%). `slippage` adds what a paper
 // fill leaves out: every taker fill (market entry, stop, signal or time exit) is moved
-// against the trade by that fraction of price. Maker fills (a resting entry limit, a
-// take-profit limit) fill at their own price, so they carry no slippage.
+// against the trade by that fraction of price. The take-profit limit fills at its own price.
 //
 // Reading the result. `totalR`/`avgR` measure the STRATEGY: R is net PnL over the risk
 // planned for that trade, so it does not depend on how big the trade was. `netUsd` and
-// `returnPct` measure the ACCOUNT: they also depend on sizing, compounding and, when
-// `discipline` is on, the risk cuts and cooldowns. Compare strategies on R with
-// discipline off; read dollars for what an account would have done.
+// `returnPct` measure the ACCOUNT: they also depend on sizing and compounding.
 
 export interface BtTrade {
   symbol: string;
@@ -36,8 +31,11 @@ export interface BtTrade {
   net: number;
   r: number;
   reason: ExitReason;
-  /** The confluence reading at the signal, when the backtest was asked to track it. */
-  cf?: { score: number; htf: number | null; checks: Record<string, boolean> };
+  /** Signal bar (bar open, UTC seconds). */
+  signalBarTime: number;
+  /** Stop and target the trade was opened with. */
+  stop: number;
+  takeProfit: number | null;
 }
 
 export interface BtResult {
@@ -59,8 +57,8 @@ export interface BtResult {
   busted: boolean;
   /** Slippage per taker fill the run was charged (fraction of price). */
   slippage: number;
-  /** Maker entries whose limit was never traded through, so no trade was opened. */
-  unfilledEntries: number;
+  /** Signals that could not be opened (price already past the stop or target at the open, or the account could not carry the order). */
+  notOpened: number;
   /** Fraction of months (calendar, UTC) that ended up, for robustness. */
   positiveMonths: number | null;
   bestMonthPct: number | null;
@@ -82,7 +80,7 @@ interface Open {
   riskUsd: number;
   entryTime: number;
   signalBarTime: number;
-  cf?: BtTrade["cf"];
+  initialStop: number;
 }
 
 /**
@@ -97,39 +95,21 @@ export function backtest(a: {
   settings: RiskSettings;
   startBalance: number;
   from: number;
-  /** Skip signals whose confluence score (0–100) is below this. Omit to trade every signal, as before. */
-  minConfluence?: number;
-  /** Record the confluence reading of every trade (for analysis), even when no gate is applied. */
-  trackConfluence?: boolean;
-  /** Apply the live bot's discipline for this timeframe: cool down after losses and trade smaller while the account is down. */
-  discipline?: boolean;
   /** Extra cost on every taker fill, as a fraction of price (0.0005 = 0.05% per side). Default 0. */
   slippage?: number;
-  /**
-   * Enter with a limit order resting at the signal bar's close (maker fee, no slippage) instead
-   * of a market order at the next open. The entry happens only if price trades through the
-   * limit: within the next bar (`true`), or, with finer `candles`, within `timeoutSec` of the
-   * signal bar's close, which is how the live bot cancels an unfilled order. The live bot places
-   * the order a few seconds after the close and only counts candles that start after that, so
-   * `delaySec` (60 matches live) leaves out fine candles starting before close + delaySec.
-   */
-  makerEntry?: boolean | { candles: Record<string, Candle[]>; timeoutSec: number; delaySec?: number };
 }): BtResult {
   const { strategy, candlesBySymbol, settings } = a;
   const slip = a.slippage ?? 0;
   const symbols = Object.keys(candlesBySymbol);
   let balance = a.startBalance;
   let busted = false;
-  let unfilledEntries = 0;
+  let notOpened = 0;
   const open = new Map<string, Open>();
   const pendingExit = new Map<string, string>();
-  const pendingEntry = new Map<string, { side: Side; limit: number; stop: number; takeProfit: number | null; signalBarTime: number; cf?: BtTrade["cf"] }>();
+  const pendingEntry = new Map<string, { side: Side; stop: number; takeProfit: number | null; signalBarTime: number }>();
   const trades: BtTrade[] = [];
   const curve: { time: number; equity: number }[] = [];
   let liquidations = 0;
-  const recent: RecentTrade[] = [];
-  const tfSec = TF_SECONDS[a.timeframe as Timeframe] ?? 3600;
-  const tfMs = tfSec * 1000;
 
   // Index bars by time per symbol.
   const times = [...new Set(symbols.flatMap((s) => candlesBySymbol[s].map((c) => c.time)))].sort((x, y) => x - y);
@@ -143,19 +123,6 @@ export function backtest(a: {
   /** The direction of the order that closes a position on this side. */
   const closeDir = (side: Side): 1 | -1 => (side === "long" ? -1 : 1);
 
-  /** True when a maker entry resting at `limit` since the open of bar `c` gets filled. */
-  const fine = typeof a.makerEntry === "object" ? a.makerEntry : null;
-  const fineCursor: Record<string, number> = {};
-  function makerFilled(sym: string, side: Side, limit: number, c: Candle) {
-    if (!fine) return limitFilled(side, limit, c);
-    const list = fine.candles[sym] ?? [];
-    let j = fineCursor[sym] ?? 0;
-    while (j < list.length && list[j].time < c.time + (fine.delaySec ?? 0)) j++;
-    fineCursor[sym] = j;
-    for (let k = j; k < list.length && list[k].time < c.time + fine.timeoutSec; k++) if (limitFilled(side, limit, list[k])) return true;
-    return false;
-  }
-
   function close(sym: string, o: Open, price: number, reason: ExitReason, feeRate: number, time: number) {
     // Maker fills (the target limit) and liquidations fill at their own price; everything else is a taker fill.
     const exit = reason === "liquidation" ? o.liq : feeRate === MAKER_FEE ? price : slipped(price, closeDir(o.side));
@@ -165,10 +132,10 @@ export function backtest(a: {
     trades.push({
       symbol: sym, side: o.side, entryTime: o.entryTime, exitTime: time, entry: o.entry,
       exit, qty: o.qty, leverage: Math.round((o.qty * o.entry) / o.margin),
-      riskUsd: o.riskUsd, entryFee: o.entryFee, net, r: o.riskUsd > 0 ? net / o.riskUsd : 0, reason, cf: o.cf,
+      riskUsd: o.riskUsd, entryFee: o.entryFee, net, r: o.riskUsd > 0 ? net / o.riskUsd : 0, reason,
+      signalBarTime: o.signalBarTime, stop: o.initialStop, takeProfit: o.takeProfit,
     });
     if (reason === "liquidation") liquidations++;
-    recent.push({ symbol: sym, r: o.riskUsd > 0 ? net / o.riskUsd : 0, closed_at: new Date(time * 1000).toISOString() });
     open.delete(sym);
     if (equityNow() < 10) busted = true;
   }
@@ -180,7 +147,7 @@ export function backtest(a: {
       const all = candlesBySymbol[sym];
       const c = all[i];
 
-      // 1) Orders queued at the previous close fill at this bar's open (a maker entry: at its limit, if reached).
+      // 1) Orders queued at the previous close fill at this bar's open.
       const o0 = open.get(sym);
       const pe = pendingExit.get(sym);
       if (o0 && pe) close(sym, o0, c.open, pe as ExitReason, TAKER_FEE, c.time);
@@ -188,25 +155,16 @@ export function backtest(a: {
       const pn = pendingEntry.get(sym);
       pendingEntry.delete(sym);
       if (pn && !open.has(sym) && !busted) {
-        const maker = !!a.makerEntry;
-        const entry = maker ? pn.limit : slipped(c.open, pn.side === "long" ? 1 : -1);
-        const okSide = pn.side === "long" ? pn.stop < entry : pn.stop > entry;
-        const okTp = pn.takeProfit == null || (pn.side === "long" ? pn.takeProfit > entry : pn.takeProfit < entry);
-        if (maker && okSide && okTp && !makerFilled(sym, pn.side, pn.limit, c)) unfilledEntries++;
-        else if (okSide && okTp) {
-          const eq = equityNow();
-          const mult = a.discipline ? riskMultiplier({ equity: eq, startBalance: a.startBalance, recent, timeframe: a.timeframe }).mult : 1;
-          const sz = sizePosition({
-            side: pn.side, entry, stop: pn.stop, equity: eq, freeBalance: balance, stepSize: a.filters[sym]?.step ?? 0.00001,
-            settings: { ...settings, riskPct: settings.riskPct * mult }, entryFeeRate: maker ? MAKER_FEE : TAKER_FEE,
+        const entry = slipped(c.open, pn.side === "long" ? 1 : -1);
+        const plan = planEntry({ side: pn.side, entry, stop: pn.stop, takeProfit: pn.takeProfit, tick: tick(sym) });
+        const sz = "skip" in plan ? plan : sizePosition({ side: pn.side, entry, stop: plan.stop, equity: equityNow(), freeBalance: balance, stepSize: a.filters[sym]?.step ?? 0.00001, settings });
+        if ("skip" in plan || "skip" in sz) notOpened++;
+        else {
+          balance -= sz.margin + sz.entryFee;
+          open.set(sym, {
+            side: pn.side, entry, qty: sz.qty, margin: sz.margin, entryFee: sz.entryFee, liq: sz.liqPrice,
+            stop: plan.stop, takeProfit: plan.takeProfit, trailed: false, riskUsd: sz.riskUsd, entryTime: c.time, signalBarTime: pn.signalBarTime, initialStop: plan.stop,
           });
-          if (!("skip" in sz)) {
-            balance -= sz.margin + sz.entryFee;
-            open.set(sym, {
-              side: pn.side, entry, qty: sz.qty, margin: sz.margin, entryFee: sz.entryFee, liq: sz.liqPrice,
-              stop: pn.stop, takeProfit: pn.takeProfit, trailed: false, riskUsd: sz.riskUsd, entryTime: c.time, signalBarTime: pn.signalBarTime, cf: pn.cf,
-            });
-          }
         }
       }
 
@@ -243,21 +201,7 @@ export function backtest(a: {
       }
       if (flat && !busted) {
         const sig = strategy.entry(hist);
-        const cool = a.discipline ? cooldownUntil(recent, sym, tfMs, a.timeframe) : null;
-        const cooling = cool != null && cool.until > t * 1000;
-        const live = sig && !("skip" in sig) ? sig : null;
-        const stop = live ? roundStop(live.side, live.stop, tick(sym)) : 0;
-        const cf = live && (a.minConfluence != null || a.trackConfluence) ? confluence({ strategy: strategy.key, timeframe: a.timeframe as Timeframe, side: live.side, candles: hist, entry: c.close, stop }) : null;
-        const agrees = cf == null || a.minConfluence == null || passesGate(cf, a.minConfluence);
-        if (live && agrees && !cooling)
-          pendingEntry.set(sym, {
-            side: live.side,
-            limit: c.close,
-            stop,
-            takeProfit: live.takeProfit == null ? null : toTick(live.takeProfit, tick(sym), "nearest"),
-            signalBarTime: c.time,
-            cf: cf ? { score: cf.score, htf: cf.htf, checks: Object.fromEntries(cf.checks.map((k) => [k.key, k.pass])) } : undefined,
-          });
+        if (sig && !("skip" in sig)) pendingEntry.set(sym, { side: sig.side, stop: sig.stop, takeProfit: sig.takeProfit, signalBarTime: c.time });
       }
     }
 
@@ -306,7 +250,7 @@ export function backtest(a: {
     liquidations,
     busted,
     slippage: slip,
-    unfilledEntries,
+    notOpened,
     positiveMonths: months.length ? months.filter((m) => m > 0).length / months.length : null,
     bestMonthPct: months.length ? Math.max(...months) : null,
     worstMonthPct: months.length ? Math.min(...months) : null,

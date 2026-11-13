@@ -1,7 +1,4 @@
 import type { Candle } from "./types.ts";
-import type { RecentTrade } from "./discipline.ts";
-import type { NewsState } from "./news.ts";
-import type { Facets } from "./playbook.ts";
 
 export interface SymbolFilters {
   step: number;
@@ -67,62 +64,11 @@ export interface AccountRow {
   timeframe: string;
   balance: number;
   status: "active" | "busted";
+  /** The owner's bots are switched on (bot_settings.enabled). Off: open trades are still managed, nothing new is opened. */
   enabled: boolean;
   risk_pct: number;
   max_leverage: number;
   start_balance: number;
-  /** Shadow-only: signals are logged and replayed but never traded (tuning.ts decides). */
-  probation: boolean;
-  /** Per-setup confluence threshold; null: the global default. */
-  min_confluence: number | null;
-  /** Move the stop to fee cover once the trade reaches +1R. */
-  breakeven: boolean;
-  /** Scale risk by entry confluence and the setup's verdict. */
-  conviction: boolean;
-  /** The setup's latest analyzer verdict (live_ready | promising | unproven | needs_data | avoid), null before the first run. */
-  verdict: string | null;
-  /** Latest closed trades, oldest first. */
-  recent: RecentTrade[];
-  /** Aggressive accounts: which life the account is in (1 = the first). */
-  life?: number;
-  life_started_at?: string | null;
-  /** Aggressive accounts: what the account has learned (playbook.ts). Null until its first run. */
-  playbook?: unknown;
-  /** Set when the owner asked for a redeploy that has not been carried out yet. */
-  redeploy_requested_at?: string | null;
-}
-
-/** What the playbook chose a trade for: the rule set that produced the signal and its context. */
-export interface TradeAggro {
-  src: string;
-  facets: Facets;
-  /** Expected R at entry (what was traded on), the raw record-based estimate behind it, and the rule set's sample count. */
-  exp: number;
-  raw?: number;
-  n: number;
-  /** Share of equity the playbook asked to risk. */
-  risk: number;
-}
-
-/** An aggressive account's closed trade, as far as the playbook needs it. */
-export interface AggroTradeRow {
-  id: string;
-  aggro: TradeAggro | null;
-  r_multiple: number | null;
-  qty: number;
-  entry_price: number;
-  exit_price: number | null;
-  risk_usd: number;
-  net_pnl?: number | null;
-  closed_at?: string;
-}
-
-/** What an aggressive account's playbook has not processed yet. */
-export interface AggroLearnState {
-  trades: AggroTradeRow[];
-  signals: { id: string; features: Record<string, number | string>; outcome_r: number }[];
-  /** The current life's closed trades, present only when the life has ended and has no post-mortem yet. */
-  life_trades?: AggroTradeRow[] | null;
 }
 
 export interface TradeRow {
@@ -147,76 +93,20 @@ export interface TradeRow {
   checked_until: string;
   mfe_price: number | null;
   mae_price: number | null;
-  /** The account's life the trade was opened in. */
-  life?: number | null;
-  /** Aggressive accounts only. */
-  aggro?: TradeAggro | null;
-}
-
-/** An active lesson: skip entries that match its rule (see analysis.ts). */
-export interface LessonRow {
-  id: string;
-  user_id: string;
-  strategy: string;
-  timeframe: string | null;
-  feature: string;
-  op: "lt" | "gte" | "eq";
-  value: number | string;
-  title: string;
-}
-
-/** An entry limit order resting at the signal close (maker entries, risk.ts ENTRY). */
-export interface PendingEntryRow {
-  id: string;
-  user_id: string;
-  account_id: string;
-  timeframe: string;
-  symbol: string;
-  side: "long" | "short";
-  limit_price: number;
-  placed_at: string;
-  expires_at: string;
-  /** The trade it becomes when it fills. */
-  payload: OpenTradeInput;
-  /** Entry features, for the shadow signal if it lapses unfilled. */
-  features: Record<string, number | string>;
-}
-
-export interface PlaceEntryInput {
-  account_id: string;
-  placed_at: string;
-  expires_at: string;
-  features: Record<string, number | string>;
-  payload: OpenTradeInput;
 }
 
 export interface BotState {
   accounts: AccountRow[];
   open_trades: TradeRow[];
-  pending_entries?: PendingEntryRow[];
   cursors: Record<string, string>;
-  lessons?: LessonRow[];
-  /** Latest crypto-news read (null before bot-news has run). */
-  news?: (NewsState & { updated_at: string }) | null;
-  /** Per aggressive account id. */
-  aggro?: Record<string, AggroLearnState>;
 }
 
-/** Why a signal was not traded. "playbook": an aggressive account's playbook passed on it. */
-export type SkipReason = "lesson" | "confluence" | "cooldown" | "news" | "busted" | "probation" | "min_stop" | "unfilled" | "playbook";
-
-export interface FilteredSignalInput {
-  account_id: string;
-  reason: SkipReason;
-  lesson_ids: string[];
-  symbol: string;
-  side: "long" | "short";
-  entry_price: number;
-  stop_price: number;
-  take_profit: number | null;
-  signal_bar_time: string;
-  features: Record<string, number | string>;
-}
+/**
+ * Why a signal was not opened. Strategy v3 trades every signal, so these are the only cases:
+ * the account is busted, the price already passed the stop or target ("stale"), or the account
+ * could not carry the order ("sizing").
+ */
+export type SkipReason = "busted" | "stale" | "sizing";
 
 export interface EventRow {
   user_id?: string | null;
@@ -255,12 +145,6 @@ export interface OpenTradeInput {
   entry_reason: string;
   entry_indicators: Record<string, number>;
   sizing_notes: string[];
-  /** Fee on the entry fill; omitted: taker (a market order). 0 for a filled limit order. */
-  entry_fee_rate?: number;
-  /** The resting order this fill came from; it is removed in the same transaction. */
-  pending_id?: string;
-  /** Aggressive accounts: the rule set and context the playbook chose the trade for. */
-  aggro?: TradeAggro;
 }
 
 export interface StrategyMeta {
@@ -272,24 +156,20 @@ export interface StrategyMeta {
   params: Record<string, number>;
   /** The only timeframes the strategy gets an account on (omitted: all). */
   timeframes?: readonly string[];
-  /** Present on a meta strategy (the aggressive accounts). */
-  pool?: readonly string[];
 }
 
 /** The strategy rows bot_sync takes, from the strategy definitions. */
-export const strategyMeta = (list: { key: string; name: string; version: number; summary: string; rules: string; params: Record<string, number>; timeframes?: readonly string[]; pool?: readonly string[] }[]): StrategyMeta[] =>
-  list.map(({ key, name, version, summary, rules, params, timeframes, pool }) => ({ key, name, version, summary, rules, params, ...(timeframes ? { timeframes } : {}), ...(pool ? { pool } : {}) }));
+export const strategyMeta = (list: { key: string; name: string; version: number; summary: string; rules: string; params: Record<string, number>; timeframes?: readonly string[] }[]): StrategyMeta[] =>
+  list.map(({ key, name, version, summary, rules, params, timeframes }) => ({ key, name, version, summary, rules, params, ...(timeframes ? { timeframes } : {}) }));
 
 export interface Db {
   lock(ttlSeconds: number): Promise<boolean>;
   unlock(error: string | null, summary: unknown): Promise<void>;
+  /** Stores the rule sets and creates the missing accounts. Nothing is deleted (supabase/bot_reset.sql does that). */
   sync(strategies: StrategyMeta[], timeframes: readonly string[]): Promise<void>;
   getState(): Promise<BotState>;
   setCursor(key: string, barTimeIso: string): Promise<void>;
   openTrade(p: OpenTradeInput): Promise<{ trade: TradeRow; balance: number }>;
-  /** Rests an entry limit order until it fills or lapses. */
-  placeEntry(p: PlaceEntryInput): Promise<void>;
-  cancelEntries(ids: string[]): Promise<void>;
   closeTrade(a: { id: string; price: number; reason: string; feeRate: number; at: string; note: string }): Promise<{
     trade: TradeRow & { net_pnl: number; r_multiple: number | null; closed_at: string };
     balance: number;
@@ -297,103 +177,25 @@ export interface Db {
   } | null>;
   updateTrades(u: TradeUpdate[]): Promise<void>;
   log(events: EventRow[]): Promise<void>;
-  logFiltered(rows: FilteredSignalInput[]): Promise<void>;
-  /** Stores an aggressive account's playbook and marks the outcomes that went into it as learned (all or nothing). */
-  savePlaybook(p: { account_id: string; playbook: unknown; trade_ids: string[]; signal_ids: string[]; /** The `rev` of the stored playbook this one was built from: the save is refused if another run has saved since. */ prev_rev?: number }): Promise<void>;
-  /** Starts an aggressive account's next life. */
-  redeploy(accountId: string, at: string): Promise<{ balance: number; start_balance: number; status: "active" | "busted"; life: number; life_started_at: string }>;
 }
 
 // ───────────────────────── Analysis (bot-analyze) ─────────────────────────
 
-export interface LessonRecord extends LessonRow {
-  status: "proposed" | "active" | "retired" | "rejected";
-  /** The owner paused it: it is not switched back on automatically. */
-  paused?: boolean;
-  activated_at?: string | null;
-  source: "mined" | "ai";
-  explanation: string;
-  blocked: number;
-  blocked_r: number;
-  created_at: string;
-}
-
-export interface FilteredSignalRow {
-  id: string;
-  user_id: string;
-  account_id: string;
-  reason: SkipReason;
-  features: Record<string, number | string>;
-  lesson_ids: string[];
-  strategy: string;
-  timeframe: string;
-  symbol: string;
-  side: "long" | "short";
-  entry_price: number;
-  stop_price: number;
-  take_profit: number | null;
-  signal_bar_time: string;
-  created_at: string;
-}
-
-export interface TunableAccount {
+export interface AnalysisAccount {
   id: string;
   user_id: string;
   strategy: string;
   timeframe: string;
   start_balance: number;
   status: "active" | "busted";
-  probation: boolean;
-  probation_changed_at: string | null;
-  min_confluence: number | null;
-  min_confluence_changed_at: string | null;
-  breakeven: boolean;
-  breakeven_changed_at: string | null;
-  conviction: boolean;
   verdict: string | null;
 }
 
-export interface AccountTune {
-  id: string;
-  probation?: boolean;
-  min_confluence?: number | null;
-  breakeven?: boolean;
-  conviction?: boolean;
-  verdict?: string;
-}
-
 export interface AnalysisState {
-  settings: { user_id: string; auto_learn: boolean }[];
-  accounts: TunableAccount[];
+  accounts: AnalysisAccount[];
   /** Closed trades, oldest first, with numbers possibly as strings (Postgres numerics). */
   trades: (Record<string, unknown> & { id: string; reviewed: boolean; review_category: string | null; review: unknown })[];
-  lessons: LessonRecord[];
-  pending_signals: FilteredSignalRow[];
-  /** Replayed signals (newest 4000): learning data and each lesson's recent record. */
-  resolved_signals: (Omit<FilteredSignalRow, "entry_price" | "stop_price" | "take_profit" | "created_at"> & { outcome_r: number; outcome_r_be?: number | null; resolved_at: string })[];
   last_reports: { user_id: string; kind: string; period_start: string }[];
-}
-
-export interface NewLesson {
-  user_id: string;
-  strategy: string;
-  timeframe: string | null;
-  feature: string;
-  op: "lt" | "gte" | "eq";
-  value: number | string;
-  status: "proposed" | "active";
-  source: "mined" | "ai";
-  title: string;
-  explanation: string;
-  evidence: unknown;
-}
-
-export interface LessonChange {
-  id: string;
-  status?: "proposed" | "active" | "retired";
-  blocked?: number;
-  blocked_r?: number;
-  retired_reason?: string;
 }
 
 export interface ReportInput {
@@ -410,10 +212,9 @@ export interface ReportInput {
 export interface AnalysisDb {
   state(): Promise<AnalysisState>;
   saveReviews(rows: { id: string; review: unknown }[]): Promise<void>;
-  resolveSignals(rows: { id: string; outcome_r: number | null; outcome_r_be?: number | null; outcome_note: string }[]): Promise<void>;
-  saveLessons(rows: (NewLesson | LessonChange)[]): Promise<void>;
   saveReport(r: ReportInput): Promise<void>;
-  tuneAccounts(rows: AccountTune[]): Promise<void>;
+  /** Stores each setup's latest verdict (shown on the dashboard; it does not change what is traded). */
+  saveVerdicts(rows: { id: string; verdict: string }[]): Promise<void>;
 }
 
 /** Calls a PostgREST RPC with the service-role key. */
@@ -444,12 +245,6 @@ function rpcClient(url: string, serviceKey: string) {
   return rpc;
 }
 
-/** PostgREST client for the news RPC in supabase/bot.sql. */
-export function restNewsDb(url: string, serviceKey: string) {
-  const rpc = rpcClient(url, serviceKey);
-  return { saveNews: async (data: NewsState) => void (await rpc("bot_save_news", { p: { data } })) };
-}
-
 /** PostgREST client for the engine RPCs in supabase/bot.sql. */
 export function restDb(url: string, serviceKey: string): Db {
   const rpc = rpcClient(url, serviceKey);
@@ -460,15 +255,10 @@ export function restDb(url: string, serviceKey: string): Db {
     getState: () => rpc<BotState>("bot_get_state", {}),
     setCursor: async (key, t) => void (await rpc("bot_set_cursor", { p_key: key, p_bar_time: t })),
     openTrade: (p) => rpc("bot_open_trade", { p }),
-    placeEntry: async (p) => void (await rpc("bot_place_entry", { p })),
-    cancelEntries: async (ids) => void (ids.length && (await rpc("bot_cancel_entries", { p_ids: ids }))),
     closeTrade: (a) =>
       rpc("bot_close_trade", { p_trade_id: a.id, p_price: a.price, p_reason: a.reason, p_fee_rate: a.feeRate, p_at: a.at, p_note: a.note }),
     updateTrades: async (u) => void (u.length && (await rpc("bot_update_trades", { p: u }))),
     log: async (e) => void (e.length && (await rpc("bot_log", { p: e }))),
-    logFiltered: async (f) => void (f.length && (await rpc("bot_log_filtered", { p: f }))),
-    savePlaybook: async (p) => void (await rpc("bot_save_playbook", { p })),
-    redeploy: (id, at) => rpc("bot_redeploy", { p_account_id: id, p_at: at }),
   };
 }
 
@@ -478,9 +268,7 @@ export function restAnalysisDb(url: string, serviceKey: string): AnalysisDb {
   return {
     state: () => rpc<AnalysisState>("bot_analysis_state", {}),
     saveReviews: async (r) => void (r.length && (await rpc("bot_save_reviews", { p: r }))),
-    resolveSignals: async (r) => void (r.length && (await rpc("bot_resolve_signals", { p: r }))),
-    saveLessons: async (r) => void (r.length && (await rpc("bot_save_lessons", { p: r }))),
     saveReport: async (r) => void (await rpc("bot_save_report", { p: r })),
-    tuneAccounts: async (r) => void (r.length && (await rpc("bot_tune_accounts", { p: r }))),
+    saveVerdicts: async (r) => void (r.length && (await rpc("bot_save_verdicts", { p: r }))),
   };
 }

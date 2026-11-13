@@ -2,6 +2,8 @@
 
 The bots run inside your existing Supabase project, on the free tier: a cron job calls an edge function every minute, about 43k calls a month against a 500k free quota. They keep trading when the app is closed and your computer is off.
 
+Already running an older version? Go to [Upgrading to strategy v3](#upgrading-to-strategy-v3).
+
 ## 1. Database
 
 In **Supabase → SQL Editor**, run [`supabase/schema.sql`](../../supabase/schema.sql) again (it's safe to re-run), then run [`supabase/bot.sql`](../../supabase/bot.sql).
@@ -27,30 +29,35 @@ Open [`supabase/bot_cron.sql`](../../supabase/bot_cron.sql) and replace `<PROJEC
 
 ## 4. Start
 
-Open UpTrade → **Bots** → **Start bots**. Within a minute the accounts appear (one per strategy and timeframe, 60 with the v2 variants and the news twins), and the status pill turns green (**Running**).
+Open UpTrade → **Bots** → **Start bots**. Within a minute the 15 accounts appear (five rule sets × 15m, 1h, 4h), and the status pill turns green (**Running**).
 
-## 5. AI analysis and learning (optional, recommended)
+## 5. AI analysis (optional, recommended)
 
-Deploy `bot-analyze` and re-run `bot_cron.sql`. This reviews every trade, ranks the setups, writes hourly to monthly reports and lets the bots learn from their losers. See [ANALYSIS.md](ANALYSIS.md).
+Deploy `bot-analyze` and re-run `bot_cron.sql`. This reviews every trade, ranks the rule sets and writes hourly to monthly reports. It only measures; it never changes what the bots trade. See [ANALYSIS.md](ANALYSIS.md).
 
-## 6. Crypto news (optional, for the "+ News" bots)
+## Upgrading to strategy v3
 
-Deploy `bot-news` and re-run `bot_cron.sql`. It reads public RSS headlines and the Fear & Greed index every 10 minutes; no key is needed. Without it, the "+ News" bots trade on the indicators alone. See [NEWS.md](NEWS.md).
+v3 replaces every earlier strategy and removes the gates, lessons, probation, news and the aggressive accounts ([V3.md](V3.md)). Do these in this order:
 
-## Upgrading an existing install
-
-After pulling this version, do all of these, in this order:
-
-1. Re-run [`supabase/bot.sql`](../../supabase/bot.sql) in the SQL Editor (safe to re-run; it only adds columns and a table).
-2. Redeploy all three functions:
+1. **Pause the runner** so nothing trades halfway through. In the SQL Editor:
+   ```sql
+   select cron.unschedule(jobid) from cron.job where jobname like 'uptrade-bot-%';
+   ```
+2. **Run [`supabase/bot.sql`](../../supabase/bot.sql).** It replaces the engine functions and drops the ones nothing calls any more.
+3. **Run [`supabase/bot_reset.sql`](../../supabase/bot_reset.sql).** Read its header first: it **permanently deletes** every bot account, every bot trade, the event log, all reports and the old learning tables. Your manual trading and your bot settings are not touched. If you want to keep the old trades, export `bot_trades` from the Table Editor before this step.
+4. **Deploy the functions:**
    ```bash
    npx supabase functions deploy bot-tick --no-verify-jwt
    npx supabase functions deploy bot-analyze --no-verify-jwt
-   npx supabase functions deploy bot-news --no-verify-jwt
+   npx supabase functions deploy bot-chat          # only if you use the chatbot
+   npx supabase functions delete bot-news          # no longer used
    ```
-3. Re-run [`supabase/bot_cron.sql`](../../supabase/bot_cron.sql) with your project ref and secret (it adds the news job).
+5. **Run [`supabase/bot_cron.sql`](../../supabase/bot_cron.sql)** with your project ref and secret. It schedules tick, analyze and prune again, and removes the old news job.
+6. **Deploy the web app** (push to `main`).
 
-Don't delete the old trades: they are what the bots learn from. The next `bot-tick` run creates the accounts for any new strategy (the "+ News" twins, the v2 strategies, the two aggressive accounts). Run the SQL before deploying the functions: an older `bot_sync` would create the aggressive accounts on every timeframe (the runner ignores the extra ones). Existing lessons keep working; any that were waiting only because the old limit was 3 per setup go live if they still hold on today's data.
+Within a minute of step 5 the Bots page shows 15 fresh $100 accounts. The first trades follow the next bar closes: 15m within the quarter hour.
+
+Skipping the reset is possible but untidy: the engine ignores accounts of rule sets it no longer has, so the old ones would sit on the dashboard frozen, with any open trade of theirs still managed by nobody.
 
 ## Checking it's healthy
 
@@ -60,28 +67,36 @@ Don't delete the old trades: they are what the bots learn from. The next `bot-ti
   select * from bot_runtime;                                              -- last run, last error, run count
   select status_code, content from net._http_response order by created desc limit 5;  -- the function's replies
   ```
+  `last_summary` in `bot_runtime` shows the last run: `signals` is how many signals the rule sets gave, `opened` how many became trades, and `skippedByReason` why any did not.
+- Signals that were not opened, and why:
+  ```sql
+  select created_at, timeframe, symbol, message from bot_events where kind = 'skipped' order by created_at desc limit 20;
+  ```
 
-**Market data region.** The function fetches candles from `data-api.binance.vision`, and falls back to `api.binance.com`. If your Supabase project's region can't reach either, every run reports `Binance unreachable` on the Bots page. Tell me and I'll add another data source.
+**Market data region.** The function fetches candles from `data-api.binance.vision`, and falls back to `api.binance.com`. If your Supabase project's region can't reach either, every run reports `Binance unreachable` on the Bots page.
 
 ## Pause, resume, reset
 
 - **Pause new entries:** the button on the Bots page. Open trades are still managed until they exit.
 - **Stop everything:** `select cron.unschedule('uptrade-bot-tick');`
-- **Start the test over** (deletes every bot trade):
-  ```sql
-  delete from bot_accounts; delete from bot_cursors; delete from bot_events;
-  ```
-  The next run recreates the accounts with $100 each.
+- **Start the test over** (deletes every bot trade): run [`supabase/bot_reset.sql`](../../supabase/bot_reset.sql). The next run recreates the accounts with $100 each.
 
 ## Backtest
-
-The last results, before and after the entry gate, are in [docs/backtests](../backtests/) and explained in [EVIDENCE.md](EVIDENCE.md).
 
 On a computer that can reach Binance:
 
 ```bash
 npm install
-npm run backtest              # the last 365 days; or: npm run backtest -- --days 180
+npm run backtest                    # the five live rule sets, last 365 days, fees only
+npm run backtest -- --slip 0.05     # also 0.05% slippage on every taker fill (closer to a real account)
+npm run backtest -- --all           # all ten candidate rule sets
+npm run backtest -- --days 180
 ```
 
-This writes `docs/backtests/latest.md` for all 42 setups (the news twins are skipped: there is no news history). The report keeps the **strategy** (trades, win rate, average R, total R: always without discipline) apart from the **account** (net $, return, max drawdown, monthly consistency). `npm run backtest` alone trades every signal with fees only. Add `--gate 65 --slip 0.05 --discipline` to trade the way the live bots do now: the confluence gate, 0.05% slippage on every taker fill, and the cooldown and risk cuts of each timeframe. `--maker` models limit-order entries (off in the live bots). `node scripts/gate-sweep.ts` compares thresholds on an older and a newer half of the year.
+This writes `docs/backtests/latest.md`. It trades every signal, as the live bots do. Without `--slip` it matches what the paper accounts charge; with it, what a real account would pay.
+
+The run the five were chosen on uses a fixed year and works offline once the candles are cached:
+
+```bash
+node --experimental-strip-types scripts/experiments/v3-select.ts
+```

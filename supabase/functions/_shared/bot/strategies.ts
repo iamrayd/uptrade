@@ -1,121 +1,490 @@
-import type { Candle, ManageResult, Side, StrategyDef } from "./types.ts";
-import { atr, bollinger, dmi, ema, highest, lowest, macd, rsi, sma, supertrend } from "./indicators.ts";
-import { AGGRO, AGGRO_KEY } from "./playbook.ts";
+import type { Candle, ManageResult, Side, Signal, StrategyDef } from "./types.ts";
+import { atr, bollinger, dmi, ema, highest, lowest, rsi, sma } from "./indicators.ts";
+import { breaks, fvgAt, levels, orderBlockFor, rejectionCandle, rejects, swings, zoneState, type Zone } from "./structure.ts";
 
-// Five widely used crypto strategies. Each one looks only at CLOSED bars, so a
-// signal can't repaint. Stops are ATR- or structure-based; position size is
-// decided by the risk engine (risk.ts), never by the strategy.
+// Strategy v3. Every rule set looks only at CLOSED bars, so a signal can't repaint, and every
+// signal it returns is traded: there is no score, gate or filter between a signal and an order
+// (tick.ts). Position size is decided by the risk engine (risk.ts), never by the strategy.
 //
-// Where a rule is my addition to the textbook version it is marked
-// "Modification" in the rules text, with the reason.
+// CANDIDATES are all the rule sets that were backtested (scripts/experiments/v3-select.ts).
+// STRATEGIES are the five that trade: Fair Value Gap and Order Block by choice, the other three
+// by their return on a year of history. docs/strategies/V3.md has the table.
 
 const r = (n: number, d = 2) => +n.toFixed(d);
-/** Rounds indicator readings for the journal without losing meaning on low-priced coins. */
+/** Rounds readings for the journal without losing meaning on low-priced coins. */
 const px = (n: number) => +n.toPrecision(8);
-
 const closes = (c: Candle[]) => c.map((x) => x.close);
-
-/** True if series a crossed above b on the last bar. */
-function crossUp(a: (number | null)[], b: (number | null)[], i: number) {
-  return a[i - 1] != null && b[i - 1] != null && a[i] != null && b[i] != null && a[i - 1]! <= b[i - 1]! && a[i]! > b[i]!;
-}
-function crossDown(a: (number | null)[], b: (number | null)[], i: number) {
-  return a[i - 1] != null && b[i - 1] != null && a[i] != null && b[i] != null && a[i - 1]! >= b[i - 1]! && a[i]! < b[i]!;
-}
-
 const dirWord = (s: Side) => (s === "long" ? "Long" : "Short");
 
-// ───────────────────────── 1. EMA trend cross ─────────────────────────
+/** Shared by the structure rule sets. */
+export const P = { atr: 14, targetR: 2, stopBufAtr: 0.25 };
+const RISK_TEXT = `**Risk**
+- Target: ${P.targetR}R (${P.targetR} × the stop distance)
+- No early exit: the trade ends at its stop or its target`;
 
-const EMA_P = { fast: 9, slow: 21, trend: 200, atr: 14, stopAtr: 1.5, targetR: 2 };
+/** A signal with a fixed-R target measured from the signal bar's close. Null when the stop is not on the losing side. */
+function signal(side: Side, close: number, stop: number, reason: string, indicators: Record<string, number>, targetR = P.targetR): Signal | null {
+  const dist = side === "long" ? close - stop : stop - close;
+  if (!(dist > 0)) return null;
+  return { side, stop, takeProfit: side === "long" ? close + targetR * dist : close - targetR * dist, reason, indicators: { close: px(close), ...indicators } };
+}
 
-export const emaTrend: StrategyDef = {
-  key: "ema_trend",
-  name: "EMA Trend Cross",
+/** Stop beyond a zone and beyond the bar that tapped it, with an ATR buffer. */
+function zoneStop(z: Zone, bar: Candle, a: number, buf = P.stopBufAtr) {
+  return z.side === "long" ? Math.min(z.bottom, bar.low) - buf * a : Math.max(z.top, bar.high) + buf * a;
+}
+
+const noManage = (): ManageResult => ({});
+
+// ───────────────────────── 1. Fair value gap ─────────────────────────
+
+const FVG_P = { ...P, trend: 200, minBodyAtr: 1, maxAge: 30 };
+
+export const fvg: StrategyDef = {
+  key: "fvg",
+  name: "Fair Value Gap",
   version: 1,
-  summary: "9/21 EMA crossover, only in the direction of the 200 EMA. 1.5×ATR stop, 2R target.",
-  params: EMA_P,
-  warmup: 400,
-  rules: `**Idea.** Ride short-term momentum only when it agrees with the long-term trend.
+  summary: `First retrace into a displacement gap, in the direction of the 200 EMA. Stop beyond the gap, ${P.targetR}R target.`,
+  params: FVG_P,
+  warmup: 300,
+  rules: `**Idea.** A fast move leaves a three-candle gap where price traded in one direction only (ICT's fair value gap). Price often returns to that gap once, finds the orders left behind and continues.
 
-**Long entry** (all on the last closed bar)
-- EMA 9 crosses above EMA 21
-- Close is above EMA 200 (long-term uptrend)
+**The gap.** Three candles where the low of the third is above the high of the first (bullish), or the high of the third is below the low of the first (bearish). The middle candle's body must be at least ${FVG_P.minBodyAtr} × ATR(${P.atr}): a displacement, not drift.
 
-**Short entry** is the mirror image: EMA 9 crosses below EMA 21 with the close below EMA 200.
+**Long entry** (on the last closed bar)
+- A bullish gap formed within the last ${FVG_P.maxAge} bars and no bar has traded into it since
+- This bar trades into the gap and closes as a green bar above the gap's middle
+- The close is above EMA ${FVG_P.trend}
 
-**Risk**
-- Stop: 1.5 × ATR(14) from the entry price
-- Target: 2R (twice the stop distance)
-- Early exit: the opposite EMA 9/21 cross closes the trade at market`,
+**Short entry** is the mirror image: a bearish gap, a red bar closing below its middle, the close below EMA ${FVG_P.trend}.
+
+**Stop.** Below the gap and below the entry bar's low, minus ${P.stopBufAtr} × ATR.
+
+${RISK_TEXT}`,
   entry(c) {
     const i = c.length - 1;
+    const a = atr(c, P.atr);
+    const t = FVG_P.trend > 0 ? ema(closes(c), FVG_P.trend) : null;
+    if (a[i] == null || (t && t[i] == null)) return null;
+    const bar = c[i];
+    for (let k = i - 1; k >= Math.max(2, i - FVG_P.maxAge); k--) {
+      if (a[k - 1] == null) break;
+      const z = fvgAt(c, k, a[k - 1]!, FVG_P.minBodyAtr);
+      if (!z) continue;
+      if (t && (z.side === "long" ? bar.close <= t[i]! : bar.close >= t[i]!)) continue;
+      if (zoneState(c, z, i - 1) !== "fresh" || !rejects(c, z, i)) continue;
+      const up = z.side === "long";
+      return signal(
+        z.side,
+        bar.close,
+        zoneStop(z, bar, a[i]!),
+        `${dirWord(z.side)}: first retrace into the ${up ? "bullish" : "bearish"} fair value gap ${px(z.bottom)}–${px(z.top)} left ${i - k} bars ago. The bar traded into the gap and closed ${up ? "green above" : "red below"} its middle, with the close ${up ? "above" : "below"} EMA ${FVG_P.trend} (${px(t?.[i] ?? 0)}).`,
+        { gapTop: px(z.top), gapBottom: px(z.bottom), gapAge: i - k, ema200: px(t?.[i] ?? 0), atr14: px(a[i]!) },
+      );
+    }
+    return null;
+  },
+  manage: noManage,
+};
+
+// ───────────────────────── 2. Order block ─────────────────────────
+
+const OB_P = { ...P, trend: 0, swing: 3, lookback: 10, minMoveAtr: 1.5, maxAge: 40, window: 200 };
+
+export const orderBlock: StrategyDef = {
+  key: "order_block",
+  name: "Order Block",
+  version: 1,
+  summary: `First retest of the last opposite candle before a break of structure. Stop beyond the block, ${P.targetR}R target.`,
+  params: OB_P,
+  warmup: 300,
+  rules: `**Idea.** The last down candle before a rally that breaks a swing high is where the buying started (ICT's order block). When price comes back to it for the first time, the same buyers tend to defend it.
+
+**Break of structure.** A close above a confirmed swing high (a high with ${OB_P.swing} lower highs on each side), or below a confirmed swing low.
+
+**The block.** The last candle against the move within ${OB_P.lookback} bars before the breaking bar. The move from the block's far edge to the breaking close must be at least ${OB_P.minMoveAtr} × ATR(${P.atr}). The zone is the block candle's full range.
+
+**Long entry** (on the last closed bar)
+- A bullish block formed within the last ${OB_P.maxAge} bars and no bar has traded into it since
+- This bar trades into the block and closes as a green bar above the block's middle
+
+**Short entry** is the mirror image.
+
+**Stop.** Below the block and below the entry bar's low, minus ${P.stopBufAtr} × ATR.
+
+${RISK_TEXT}`,
+  entry(c) {
+    const i = c.length - 1;
+    const a = atr(c, P.atr);
+    if (a[i] == null) return null;
+    const bar = c[i];
+    const from = Math.max(0, i - OB_P.window);
+    const t = OB_P.trend > 0 ? ema(closes(c), OB_P.trend) : null;
+    if (t && t[i] == null) return null;
+    const bs = breaks(c, swings(c, OB_P.swing, OB_P.swing, i - 1, from), OB_P.swing, i - 1);
+    for (let n = bs.length - 1; n >= 0; n--) {
+      const b = bs[n];
+      if (b.i < i - OB_P.maxAge) break;
+      if (a[b.i] == null) continue;
+      if (t && (b.side === "long" ? bar.close <= t[i]! : bar.close >= t[i]!)) continue;
+      const z = orderBlockFor(c, b, a[b.i]!, OB_P.lookback, OB_P.minMoveAtr);
+      if (!z || zoneState(c, z, i - 1) !== "fresh" || !rejects(c, z, i)) continue;
+      const up = z.side === "long";
+      return signal(
+        z.side,
+        bar.close,
+        zoneStop(z, bar, a[i]!),
+        `${dirWord(z.side)}: first retest of the ${up ? "bullish" : "bearish"} order block ${px(z.bottom)}–${px(z.top)}, the last ${up ? "down" : "up"} candle before the close ${up ? "above the swing high" : "below the swing low"} ${px(b.level)} ${i - b.i} bars ago. The bar traded into the block and closed ${up ? "green above" : "red below"} its middle.`,
+        { blockTop: px(z.top), blockBottom: px(z.bottom), brokenSwing: px(b.level), blockAge: i - b.i, atr14: px(a[i]!) },
+      );
+    }
+    return null;
+  },
+  manage: noManage,
+};
+
+// ───────────────────────── 3. Liquidity sweep ─────────────────────────
+
+const SW_P = { ...P, swingLeft: 5, swingRight: 3, maxAge: 60 };
+
+export const liquiditySweep: StrategyDef = {
+  key: "liquidity_sweep",
+  name: "Liquidity Sweep",
+  version: 1,
+  summary: `A wick takes out an untouched swing high or low and the bar closes back inside. Stop beyond the wick, ${P.targetR}R target.`,
+  params: SW_P,
+  warmup: 200,
+  rules: `**Idea.** Stops collect beyond obvious swing highs and lows. A quick push through one that fails to hold has used that liquidity up, and price often reverses (ICT's liquidity grab, the old "turtle soup").
+
+**Long entry** (on the last closed bar)
+- A confirmed swing low (${SW_P.swingLeft} higher lows before it, ${SW_P.swingRight} after) from the last ${SW_P.maxAge} bars that no bar has traded below since
+- This bar trades below it and closes back above it
+
+**Short entry** is the mirror image: a wick above an untouched swing high, and a close back below it.
+
+**Stop.** Beyond the sweeping bar's wick, plus ${P.stopBufAtr} × ATR(${P.atr}).
+
+${RISK_TEXT}`,
+  entry(c) {
+    const i = c.length - 1;
+    const a = atr(c, P.atr);
+    if (a[i] == null) return null;
+    const bar = c[i];
+    const pivots = swings(c, SW_P.swingLeft, SW_P.swingRight, i - 1, Math.max(0, i - SW_P.maxAge));
+    for (let n = pivots.length - 1; n >= 0; n--) {
+      const p = pivots[n];
+      const up = p.kind === "low";
+      if (up ? !(bar.low < p.price && bar.close > p.price) : !(bar.high > p.price && bar.close < p.price)) continue;
+      let untouched = true;
+      for (let k = p.i + 1; k < i && untouched; k++) if (up ? c[k].low <= p.price : c[k].high >= p.price) untouched = false;
+      if (!untouched) continue;
+      const side: Side = up ? "long" : "short";
+      return signal(
+        side,
+        bar.close,
+        up ? bar.low - P.stopBufAtr * a[i]! : bar.high + P.stopBufAtr * a[i]!,
+        `${dirWord(side)}: the bar swept the swing ${up ? "low" : "high"} ${px(p.price)} from ${i - p.i} bars ago (${up ? "low" : "high"} ${px(up ? bar.low : bar.high)}) and closed back ${up ? "above" : "below"} it at ${px(bar.close)}. The stops beyond that swing are used up.`,
+        { sweptLevel: px(p.price), wick: px(up ? bar.low : bar.high), swingAge: i - p.i, atr14: px(a[i]!) },
+      );
+    }
+    return null;
+  },
+  manage: noManage,
+};
+
+// ───────────────────────── 4. Break of structure pullback ─────────────────────────
+
+const BOS_P = { ...P, swing: 3, maxAge: 20, tolAtr: 0.1, stopAtr: 0.5, window: 200 };
+
+export const bosPullback: StrategyDef = {
+  key: "bos_pullback",
+  name: "Break of Structure Pullback",
+  version: 1,
+  summary: `Close through a swing point, then the first pullback that holds the broken level. ${P.targetR}R target.`,
+  params: BOS_P,
+  warmup: 300,
+  rules: `**Idea.** A close through a swing high shows buyers in control. The first pullback to that broken high is the low-risk place to join them.
+
+**Long entry** (on the last closed bar)
+- Within the last ${BOS_P.maxAge} bars a bar closed above a confirmed swing high (${BOS_P.swing} lower highs on each side)
+- No bar has come back to that level since
+- This bar's low reaches the level (within ${BOS_P.tolAtr} × ATR(${P.atr})) and it closes above the level as a green bar
+
+**Short entry** is the mirror image at a broken swing low.
+
+**Stop.** ${BOS_P.stopAtr} × ATR beyond the entry bar's wick.
+
+${RISK_TEXT}`,
+  entry(c) {
+    const i = c.length - 1;
+    const a = atr(c, P.atr);
+    if (a[i] == null) return null;
+    const bar = c[i];
+    const bs = breaks(c, swings(c, BOS_P.swing, BOS_P.swing, i - 1, Math.max(0, i - BOS_P.window)), BOS_P.swing, i - 1);
+    for (let n = bs.length - 1; n >= 0; n--) {
+      const b = bs[n];
+      if (b.i < i - BOS_P.maxAge) break;
+      const up = b.side === "long";
+      const z: Zone = { side: b.side, top: b.level + (up ? BOS_P.tolAtr : BOS_P.stopAtr) * a[i]!, bottom: b.level - (up ? BOS_P.stopAtr : BOS_P.tolAtr) * a[i]!, i: b.i };
+      if (zoneState(c, z, i - 1) !== "fresh") continue;
+      const holds = up ? bar.low <= z.top && bar.close > b.level && bar.close > bar.open : bar.high >= z.bottom && bar.close < b.level && bar.close < bar.open;
+      if (!holds) continue;
+      return signal(
+        b.side,
+        bar.close,
+        up ? bar.low - BOS_P.stopAtr * a[i]! : bar.high + BOS_P.stopAtr * a[i]!,
+        `${dirWord(b.side)}: price closed ${up ? "above the swing high" : "below the swing low"} ${px(b.level)} ${i - b.i} bars ago. This is the first pullback to that level, and the bar closed ${up ? "green above" : "red below"} it.`,
+        { brokenLevel: px(b.level), breakAge: i - b.i, atr14: px(a[i]!) },
+      );
+    }
+    return null;
+  },
+  manage: noManage,
+};
+
+// ───────────────────────── 5 & 6. Support / resistance ─────────────────────────
+
+const SR_P = { ...P, swing: 5, window: 300, clusterAtr: 0.5, minTouches: 2, tolAtr: 0.2 };
+
+/** Swing points of the last `window` bars that were confirmed at or before `upTo`. */
+const srPivots = (c: Candle[], i: number, upTo: number) => swings(c, SR_P.swing, SR_P.swing, upTo, Math.max(0, i - SR_P.window));
+
+export const srBounce: StrategyDef = {
+  key: "sr_bounce",
+  name: "Support / Resistance Bounce",
+  version: 1,
+  summary: `Pin bar or engulfing candle at a level with ${SR_P.minTouches}+ swing touches. Stop beyond the level, ${P.targetR}R target.`,
+  params: SR_P,
+  warmup: 320,
+  rules: `**Idea.** Price turns where it turned before. A rejection candle at such a level is the classic price-action entry.
+
+**Levels.** Swing highs and lows of the last ${SR_P.window} bars (${SR_P.swing} bars on each side) that sit within ${SR_P.clusterAtr} × ATR(${P.atr}) of each other form one level, priced at their average. A level needs ${SR_P.minTouches} or more swings.
+
+**Long entry** (on the last closed bar)
+- The previous bar closed above a level (it is support)
+- This bar's low reaches the level (within ${SR_P.tolAtr} × ATR) and it closes above it
+- The bar is a bullish pin bar (lower wick at least 60% of its range) or a bullish engulfing candle
+
+**Short entry** is the mirror image at resistance.
+
+**Stop.** Beyond the level and the entry bar's wick, plus ${P.stopBufAtr} × ATR.
+
+${RISK_TEXT}`,
+  entry(c) {
+    const i = c.length - 1;
+    const a = atr(c, P.atr);
+    if (i < 1 || a[i] == null) return null;
+    const side = rejectionCandle(c, i);
+    if (!side) return null;
+    const bar = c[i];
+    const prev = c[i - 1];
+    const up = side === "long";
+    const tol = SR_P.tolAtr * a[i]!;
+    const lv = levels(srPivots(c, i, i - 1), SR_P.clusterAtr * a[i]!, SR_P.minTouches)
+      .filter((l) => (up ? prev.close > l.price && bar.low <= l.price + tol && bar.close > l.price : prev.close < l.price && bar.high >= l.price - tol && bar.close < l.price))
+      .sort((x, y) => y.touches - x.touches)[0];
+    if (!lv) return null;
+    return signal(
+      side,
+      bar.close,
+      up ? Math.min(bar.low, lv.price) - P.stopBufAtr * a[i]! : Math.max(bar.high, lv.price) + P.stopBufAtr * a[i]!,
+      `${dirWord(side)}: a ${pinOrEngulf(c, i)} at ${up ? "support" : "resistance"} ${px(lv.price)}, a level with ${lv.touches} swing touches. The bar reached the level and closed ${up ? "above" : "below"} it.`,
+      { level: px(lv.price), touches: lv.touches, atr14: px(a[i]!) },
+    );
+  },
+  manage: noManage,
+};
+
+function pinOrEngulf(c: Candle[], i: number) {
+  const x = c[i];
+  const range = x.high - x.low;
+  const wick = Math.max(Math.min(x.open, x.close) - x.low, x.high - Math.max(x.open, x.close));
+  return range > 0 && wick / range >= 0.6 ? "pin bar" : "engulfing candle";
+}
+
+const BR_P = { ...SR_P, maxAge: 12, breakAtr: 0.1, retestAtr: 0.25, stopAtr: 0.5 };
+
+export const srBreakRetest: StrategyDef = {
+  key: "sr_break_retest",
+  name: "Break and Retest",
+  version: 1,
+  summary: `Close through a level with ${SR_P.minTouches}+ swing touches, then the first retest that holds. ${P.targetR}R target.`,
+  params: BR_P,
+  warmup: 320,
+  rules: `**Idea.** Resistance that breaks tends to act as support on the way back. The retest confirms the breakout is real before the entry.
+
+**Levels.** As in Support / Resistance Bounce: clusters of ${SR_P.minTouches}+ swing points within ${SR_P.clusterAtr} × ATR(${P.atr}).
+
+**Long entry** (on the last closed bar)
+- Within the last ${BR_P.maxAge} bars a bar closed more than ${BR_P.breakAtr} × ATR above a level, after a close at or below it
+- No bar has come back to the level since
+- This bar's low comes within ${BR_P.retestAtr} × ATR of the level and it closes above the level as a green bar
+
+**Short entry** is the mirror image.
+
+**Stop.** ${BR_P.stopAtr} × ATR beyond the level and the entry bar's wick.
+
+${RISK_TEXT}`,
+  entry(c) {
+    const i = c.length - 1;
+    const a = atr(c, P.atr);
+    if (a[i] == null) return null;
+    const bar = c[i];
+    const at = a[i]!;
+    const pivots = srPivots(c, i, i - 1);
+    for (let k = i - 1; k >= Math.max(1, i - BR_P.maxAge); k--) {
+      // Only swings confirmed by the breaking bar count: the level existed when it broke.
+      const known = pivots.filter((p) => p.i + SR_P.swing <= k);
+      for (const lv of levels(known, SR_P.clusterAtr * at, SR_P.minTouches)) {
+        const up = c[k].close > lv.price + BR_P.breakAtr * at && c[k - 1].close <= lv.price;
+        const down = c[k].close < lv.price - BR_P.breakAtr * at && c[k - 1].close >= lv.price;
+        if (!up && !down) continue;
+        const side: Side = up ? "long" : "short";
+        const z: Zone = { side, top: lv.price + (up ? BR_P.retestAtr : BR_P.stopAtr) * at, bottom: lv.price - (up ? BR_P.stopAtr : BR_P.retestAtr) * at, i: k };
+        if (zoneState(c, z, i - 1) !== "fresh") continue;
+        const holds = up ? bar.low <= z.top && bar.close > lv.price && bar.close > bar.open : bar.high >= z.bottom && bar.close < lv.price && bar.close < bar.open;
+        if (!holds) continue;
+        return signal(
+          side,
+          bar.close,
+          up ? Math.min(bar.low, lv.price) - BR_P.stopAtr * at : Math.max(bar.high, lv.price) + BR_P.stopAtr * at,
+          `${dirWord(side)}: price closed ${up ? "above" : "below"} the level ${px(lv.price)} (${lv.touches} swing touches) ${i - k} bars ago. This is the first retest, and the bar closed ${up ? "green above" : "red below"} the level.`,
+          { level: px(lv.price), touches: lv.touches, breakAge: i - k, atr14: px(at) },
+        );
+      }
+    }
+    return null;
+  },
+  manage: noManage,
+};
+
+// ───────────────────────── 7. EMA pullback ─────────────────────────
+
+const EP_P = { ...P, fast: 20, slow: 50, slope: 5, stopAtr: 0.5 };
+
+export const emaPullback: StrategyDef = {
+  key: "ema_pullback",
+  name: "EMA Pullback",
+  version: 1,
+  summary: `In a 20/50 EMA trend, the first dip to the 20 EMA that closes back above it. ${P.targetR}R target.`,
+  params: EP_P,
+  warmup: 200,
+  rules: `**Idea.** In a trend, price keeps returning to its short moving average and bouncing. Buy the dip, not the breakout.
+
+**Long entry** (on the last closed bar)
+- EMA ${EP_P.fast} is above EMA ${EP_P.slow}, and EMA ${EP_P.slow} is higher than ${EP_P.slope} bars ago
+- The previous bar stayed above EMA ${EP_P.fast}
+- This bar's low touches EMA ${EP_P.fast} and it closes above it as a green bar
+
+**Short entry** is the mirror image.
+
+**Stop.** ${EP_P.stopAtr} × ATR(${P.atr}) beyond the entry bar's wick.
+
+${RISK_TEXT}`,
+  entry(c) {
+    const i = c.length - 1;
+    if (i < EP_P.slope + 1) return null;
     const cl = closes(c);
-    const f = ema(cl, EMA_P.fast);
-    const s = ema(cl, EMA_P.slow);
-    const t = ema(cl, EMA_P.trend);
-    const a = atr(c, EMA_P.atr);
-    if (t[i] == null || a[i] == null) return null;
-    const up = crossUp(f, s, i);
-    const down = crossDown(f, s, i);
-    if (!up && !down) return null;
-    const side: Side = up ? "long" : "short";
-    const close = c[i].close;
-    const ind = { close: px(close), ema9: px(f[i]!), ema21: px(s[i]!), ema200: px(t[i]!), atr14: px(a[i]!) };
-    if (side === "long" && close <= t[i]!)
-      return { skip: `EMA 9 crossed above EMA 21, but the close ${px(close)} is below EMA 200 ${px(t[i]!)}: no longs against the trend.` };
-    if (side === "short" && close >= t[i]!)
-      return { skip: `EMA 9 crossed below EMA 21, but the close ${px(close)} is above EMA 200 ${px(t[i]!)}: no shorts against the trend.` };
-    const dist = EMA_P.stopAtr * a[i]!;
-    const sign = side === "long" ? 1 : -1;
+    const f = ema(cl, EP_P.fast);
+    const s = ema(cl, EP_P.slow);
+    const a = atr(c, P.atr);
+    if (f[i - 1] == null || s[i - EP_P.slope] == null || a[i] == null) return null;
+    const bar = c[i];
+    const prev = c[i - 1];
+    let side: Side | null = null;
+    if (f[i]! > s[i]! && s[i]! > s[i - EP_P.slope]! && prev.low > f[i - 1]! && bar.low <= f[i]! && bar.close > f[i]! && bar.close > bar.open) side = "long";
+    else if (f[i]! < s[i]! && s[i]! < s[i - EP_P.slope]! && prev.high < f[i - 1]! && bar.high >= f[i]! && bar.close < f[i]! && bar.close < bar.open) side = "short";
+    if (!side) return null;
+    const up = side === "long";
+    return signal(
+      side,
+      bar.close,
+      up ? bar.low - EP_P.stopAtr * a[i]! : bar.high + EP_P.stopAtr * a[i]!,
+      `${dirWord(side)}: EMA ${EP_P.fast} (${px(f[i]!)}) is ${up ? "above" : "below"} a ${up ? "rising" : "falling"} EMA ${EP_P.slow} (${px(s[i]!)}). The bar ${up ? "dipped" : "rallied"} to EMA ${EP_P.fast} for the first time and closed back ${up ? "above" : "below"} it.`,
+      { ema20: px(f[i]!), ema50: px(s[i]!), atr14: px(a[i]!) },
+    );
+  },
+  manage: noManage,
+};
+
+// ───────────────────────── 8. Donchian breakout ─────────────────────────
+
+const DC_P = { entryLen: 20, exitLen: 10, volLen: 20, volMult: 1.5, atr: 14, stopAtr: 2 };
+
+export const donchianBreakout: StrategyDef = {
+  key: "donchian_breakout",
+  name: "Donchian Breakout",
+  version: 1,
+  summary: "Turtle-style 20-bar breakout confirmed by volume. 2×ATR stop, trails the 10-bar channel. No fixed target.",
+  params: DC_P,
+  warmup: 100,
+  rules: `**Idea.** New 20-bar highs and lows tend to start trends. Cut losers fast and let winners run.
+
+**Long entry** (on the last closed bar)
+- The close breaks above the highest high of the previous ${DC_P.entryLen} bars
+- Volume on the breakout bar is at least ${DC_P.volMult}× its ${DC_P.volLen}-bar average
+
+**Short entry** is the mirror image (a close below the lowest low of the previous ${DC_P.entryLen} bars).
+
+**Risk**
+- Initial stop: ${DC_P.stopAtr} × ATR(${DC_P.atr})
+- Trailing stop: the opposite ${DC_P.exitLen}-bar channel, moved only in the trade's favour at each bar close
+- No fixed target. The trailing stop takes the exit.`,
+  entry(c) {
+    const i = c.length - 1;
+    if (i < DC_P.entryLen + 1) return null;
+    const a = atr(c, DC_P.atr);
+    if (a[i] == null) return null;
+    const hi = highest(c, i - 1, DC_P.entryLen);
+    const lo = lowest(c, i - 1, DC_P.entryLen);
+    const bar = c[i];
+    const side: Side | null = bar.close > hi ? "long" : bar.close < lo ? "short" : null;
+    if (!side) return null;
+    const avgVol = sma(c.map((x) => x.volume), DC_P.volLen)[i - 1];
+    if (avgVol == null || !(avgVol > 0) || bar.volume / avgVol < DC_P.volMult) return null;
+    const volX = bar.volume / avgVol;
+    const up = side === "long";
+    const dist = DC_P.stopAtr * a[i]!;
     return {
       side,
-      stop: close - sign * dist,
-      takeProfit: close + sign * dist * EMA_P.targetR,
-      reason: `${dirWord(side)}: EMA 9 (${px(f[i]!)}) crossed ${up ? "above" : "below"} EMA 21 (${px(s[i]!)}) with the close ${up ? "above" : "below"} EMA 200 (${px(t[i]!)}), so short-term momentum agrees with the long-term trend.`,
-      indicators: ind,
+      stop: up ? bar.close - dist : bar.close + dist,
+      takeProfit: null,
+      reason: `${dirWord(side)}: the close ${px(bar.close)} broke ${up ? "above the 20-bar high" : "below the 20-bar low"} ${px(up ? hi : lo)} on ${r(volX)}× average volume. No fixed target: the stop trails the 10-bar channel.`,
+      indicators: { close: px(bar.close), channelHigh20: px(hi), channelLow20: px(lo), volumeX: r(volX), atr14: px(a[i]!) },
     };
   },
-  manage(c, tr) {
+  manage(c, tr): ManageResult {
     const i = c.length - 1;
-    const cl = closes(c);
-    const f = ema(cl, EMA_P.fast);
-    const s = ema(cl, EMA_P.slow);
-    if (tr.side === "long" && crossDown(f, s, i))
-      return { exit: { reason: "signal", note: `EMA 9 (${px(f[i]!)}) crossed back below EMA 21 (${px(s[i]!)}): momentum turned against the long.` } };
-    if (tr.side === "short" && crossUp(f, s, i))
-      return { exit: { reason: "signal", note: `EMA 9 (${px(f[i]!)}) crossed back above EMA 21 (${px(s[i]!)}): momentum turned against the short.` } };
-    return {};
+    const stop = tr.side === "long" ? lowest(c, i, DC_P.exitLen) : highest(c, i, DC_P.exitLen);
+    return { stop, stopNote: `trail to the ${DC_P.exitLen}-bar ${tr.side === "long" ? "low" : "high"} ${px(stop)}` };
   },
 };
 
-// ───────────────────────── 2. Bollinger + RSI mean reversion ─────────────────────────
+// ───────────────────────── 9. Bollinger + RSI reversion ─────────────────────────
 
 const BB_P = { bbPeriod: 20, bbMult: 2, rsi: 14, rsiLow: 30, rsiHigh: 70, atr: 14, adx: 14, maxAdx: 35, minRewardRisk: 1, maxBars: 24 };
 
-export const bbRsi: StrategyDef = {
-  key: "bb_rsi",
+export const bbRsiReversion: StrategyDef = {
+  key: "bb_rsi_reversion",
   name: "Bollinger + RSI Reversion",
   version: 1,
   summary: "Fade a close outside the 2σ band at an RSI extreme once price closes back inside. Target the middle band.",
   params: BB_P,
   warmup: 200,
-  rules: `**Idea.** After an overstretched move, price tends to snap back toward its 20-bar mean.
+  rules: `**Idea.** After an overstretched move, price tends to snap back toward its 20-bar average.
 
 **Long entry**
-- The previous bar closed **below** the lower Bollinger Band (20, 2) with RSI(14) **below 30**
-- The last bar closed back **inside** the band, and it's a green bar (close > open)
+- The previous bar closed below the lower Bollinger Band (${BB_P.bbPeriod}, ${BB_P.bbMult}) with RSI(${BB_P.rsi}) below ${BB_P.rsiLow}
+- The last bar closed back inside the band as a green bar
+- ADX(${BB_P.adx}) is at most ${BB_P.maxAdx} (a strong trend is not faded)
+- The middle band is at least ${BB_P.minRewardRisk}× the stop distance away
 
-**Short entry** is the mirror image: a close above the upper band with RSI above 70, then a red close back inside.
-
-**Filters**
-- *Modification:* skip when ADX(14) > 35. Fading a strong trend is the main way this strategy loses, and ADX measures trend strength.
-- *Modification:* skip when the reward to the middle band is less than 1× the risk.
+**Short entry** is the mirror image: a close above the upper band with RSI above ${BB_P.rsiHigh}, then a red close back inside.
 
 **Risk**
-- Stop: beyond the extreme of the last 3 bars, plus 0.25 × ATR(14) buffer
-- Target: the middle band (SMA 20) at entry
-- Time stop: close at market after 24 bars if neither stop nor target was hit`,
+- Stop: beyond the extreme of the last 3 bars, plus 0.25 × ATR(${BB_P.atr})
+- Target: the middle band (SMA ${BB_P.bbPeriod}) at entry
+- Time stop: close at market after ${BB_P.maxBars} bars if neither stop nor target was hit`,
   entry(c) {
     const i = c.length - 1;
     if (i < 3) return null;
@@ -126,40 +495,24 @@ export const bbRsi: StrategyDef = {
     const { adx } = dmi(c, BB_P.adx);
     if (bb.lower[i - 1] == null || rs[i - 1] == null || a[i] == null || adx[i] == null) return null;
     const prev = c[i - 1];
-    const last = c[i];
+    const bar = c[i];
     let side: Side | null = null;
-    if (prev.close < bb.lower[i - 1]! && rs[i - 1]! < BB_P.rsiLow && last.close > bb.lower[i]! && last.close > last.open) side = "long";
-    if (prev.close > bb.upper[i - 1]! && rs[i - 1]! > BB_P.rsiHigh && last.close < bb.upper[i]! && last.close < last.open) side = "short";
-    if (!side) return null;
-    const ind = {
-      close: px(last.close),
-      bbUpper: px(bb.upper[i]!),
-      bbMid: px(bb.mid[i]!),
-      bbLower: px(bb.lower[i]!),
-      prevClose: px(prev.close),
-      rsiPrev: r(rs[i - 1]!),
-      rsi: r(rs[i]!),
-      adx14: r(adx[i]!),
-      atr14: px(a[i]!),
-    };
-    if (adx[i]! > BB_P.maxAdx)
-      return { skip: `Reversion setup, but ADX ${r(adx[i]!)} > ${BB_P.maxAdx} says the trend is too strong to fade.` };
+    if (prev.close < bb.lower[i - 1]! && rs[i - 1]! < BB_P.rsiLow && bar.close > bb.lower[i]! && bar.close > bar.open) side = "long";
+    if (prev.close > bb.upper[i - 1]! && rs[i - 1]! > BB_P.rsiHigh && bar.close < bb.upper[i]! && bar.close < bar.open) side = "short";
+    if (!side || adx[i]! > BB_P.maxAdx) return null;
+    const up = side === "long";
     const buf = 0.25 * a[i]!;
-    const stop = side === "long" ? lowest(c, i, 3) - buf : highest(c, i, 3) + buf;
+    const stop = up ? lowest(c, i, 3) - buf : highest(c, i, 3) + buf;
     const target = bb.mid[i]!;
-    const risk = Math.abs(last.close - stop);
-    const reward = side === "long" ? target - last.close : last.close - target;
-    if (risk <= 0 || reward / risk < BB_P.minRewardRisk)
-      return { skip: `Reversion setup, but the middle band is only ${r(reward / (risk || 1))}R away (need ${BB_P.minRewardRisk}R).` };
+    const risk = Math.abs(bar.close - stop);
+    const reward = up ? target - bar.close : bar.close - target;
+    if (!(risk > 0) || reward / risk < BB_P.minRewardRisk) return null;
     return {
       side,
       stop,
       takeProfit: target,
-      reason:
-        side === "long"
-          ? `Long: the previous bar closed below the lower band (${px(prev.close)} < ${px(bb.lower[i - 1]!)}) with RSI ${r(rs[i - 1]!)} (oversold). This bar closed back inside the band as a green bar. Target is the middle band ${px(target)}, ${r(reward / risk)}R away.`
-          : `Short: the previous bar closed above the upper band (${px(prev.close)} > ${px(bb.upper[i - 1]!)}) with RSI ${r(rs[i - 1]!)} (overbought). This bar closed back inside the band as a red bar. Target is the middle band ${px(target)}, ${r(reward / risk)}R away.`,
-      indicators: ind,
+      reason: `${dirWord(side)}: the previous bar closed ${up ? "below the lower" : "above the upper"} band (${px(prev.close)}) with RSI ${r(rs[i - 1]!)}. This bar closed back inside the band as a ${up ? "green" : "red"} bar. Target is the middle band ${px(target)}, ${r(reward / risk)}R away.`,
+      indicators: { close: px(bar.close), bbUpper: px(bb.upper[i]!), bbMid: px(bb.mid[i]!), bbLower: px(bb.lower[i]!), rsiPrev: r(rs[i - 1]!), rsi: r(rs[i]!), adx14: r(adx[i]!), atr14: px(a[i]!) },
     };
   },
   manage(_c, tr) {
@@ -169,350 +522,76 @@ export const bbRsi: StrategyDef = {
   },
 };
 
-// ───────────────────────── 3. Donchian breakout ─────────────────────────
+// ───────────────────────── 10. Double top / bottom ─────────────────────────
 
-const DC_P = { entryLen: 20, exitLen: 10, volLen: 20, volMult: 1.5, atr: 14, stopAtr: 2 };
+const DT_P = { ...P, swingLeft: 5, swingRight: 3, window: 120, tolAtr: 0.5, minGap: 8, minHeightAtr: 2, maxAge: 30 };
 
-export const donchian: StrategyDef = {
-  key: "donchian",
-  name: "Donchian Breakout",
+export const doubleTopBottom: StrategyDef = {
+  key: "double_top_bottom",
+  name: "Double Top / Bottom",
   version: 1,
-  summary: "Turtle-style 20-bar breakout confirmed by volume. 2×ATR stop, trails the 10-bar channel. No fixed target.",
-  params: DC_P,
-  warmup: 100,
-  rules: `**Idea.** New 20-bar highs/lows tend to start trends. Cut losers fast and let winners run.
-
-**Long entry**
-- Close breaks **above** the highest high of the previous 20 bars
-- *Modification:* volume on the breakout bar is at least 1.5× its 20-bar average. Breakouts without volume fail more often.
-
-**Short entry** is the mirror image (close below the lowest low of the previous 20 bars).
-
-**Risk**
-- Initial stop: 2 × ATR(14)
-- Trailing stop: the opposite 10-bar channel (the lowest low of the last 10 bars for a long), moved only in the trade's favour at each bar close
-- No fixed target. The trailing stop takes the exit.`,
-  entry(c) {
-    const i = c.length - 1;
-    if (i < DC_P.entryLen + 1) return null;
-    const a = atr(c, DC_P.atr);
-    if (a[i] == null) return null;
-    const hi = highest(c, i - 1, DC_P.entryLen);
-    const lo = lowest(c, i - 1, DC_P.entryLen);
-    const last = c[i];
-    let side: Side | null = null;
-    if (last.close > hi) side = "long";
-    else if (last.close < lo) side = "short";
-    if (!side) return null;
-    const vols = c.map((x) => x.volume);
-    const avgVol = sma(vols, DC_P.volLen)[i - 1];
-    if (avgVol == null) return null;
-    const volX = avgVol ? last.volume / avgVol : 0;
-    const ind = { close: px(last.close), channelHigh20: px(hi), channelLow20: px(lo), volume: px(last.volume), avgVolume20: px(avgVol), volumeX: r(volX), atr14: px(a[i]!) };
-    if (volX < DC_P.volMult)
-      return { skip: `${side === "long" ? "Upside" : "Downside"} breakout on only ${r(volX)}× average volume (need ${DC_P.volMult}×).` };
-    const dist = DC_P.stopAtr * a[i]!;
-    return {
-      side,
-      stop: side === "long" ? last.close - dist : last.close + dist,
-      takeProfit: null,
-      reason:
-        side === "long"
-          ? `Long: the close ${px(last.close)} broke above the 20-bar high ${px(hi)} on ${r(volX)}× average volume. A new range high with participation often starts a trend.`
-          : `Short: the close ${px(last.close)} broke below the 20-bar low ${px(lo)} on ${r(volX)}× average volume. A new range low with participation often starts a downtrend.`,
-      indicators: ind,
-    };
-  },
-  manage(c, tr): ManageResult {
-    const i = c.length - 1;
-    const stop = tr.side === "long" ? lowest(c, i, DC_P.exitLen) : highest(c, i, DC_P.exitLen);
-    return { stop, stopNote: `trail to the 10-bar ${tr.side === "long" ? "low" : "high"} ${px(stop)}` };
-  },
-};
-
-// ───────────────────────── 4. MACD + ADX momentum ─────────────────────────
-
-const MA_P = { fast: 12, slow: 26, signal: 9, adx: 14, minAdx: 25, atr: 14, stopAtr: 1.5, targetR: 2 };
-
-export const macdAdx: StrategyDef = {
-  key: "macd_adx",
-  name: "MACD Momentum + ADX",
-  version: 1,
-  summary: "MACD/signal cross when ADX > 25 and the DMI agrees. 1.5×ATR stop, 2R target.",
-  params: MA_P,
-  warmup: 300,
-  rules: `**Idea.** Trade MACD momentum shifts only when a real trend is present.
-
-**Long entry**
-- MACD (12, 26) crosses above its 9-period signal line
-- ADX(14) ≥ 25 (trending market)
-- +DI > −DI (the trend is up)
-
-**Short entry** is the mirror image: MACD crosses below the signal line, ADX ≥ 25, and −DI > +DI.
-
-**Risk**
-- Stop: 1.5 × ATR(14)
-- Target: 2R
-- Early exit: the opposite MACD/signal cross closes the trade at market`,
-  entry(c) {
-    const i = c.length - 1;
-    const cl = closes(c);
-    const m = macd(cl, MA_P.fast, MA_P.slow, MA_P.signal);
-    const d = dmi(c, MA_P.adx);
-    const a = atr(c, MA_P.atr);
-    if (m.signal[i - 1] == null || d.adx[i] == null || a[i] == null) return null;
-    const up = crossUp(m.line, m.signal, i);
-    const down = crossDown(m.line, m.signal, i);
-    if (!up && !down) return null;
-    const side: Side = up ? "long" : "short";
-    const ind = {
-      close: px(c[i].close),
-      macd: px(m.line[i]!),
-      signal: px(m.signal[i]!),
-      hist: px(m.hist[i]!),
-      adx14: r(d.adx[i]!),
-      plusDI: r(d.plusDI[i]!),
-      minusDI: r(d.minusDI[i]!),
-      atr14: px(a[i]!),
-    };
-    if (d.adx[i]! < MA_P.minAdx) return { skip: `MACD crossed ${up ? "up" : "down"}, but ADX ${r(d.adx[i]!)} < ${MA_P.minAdx}: no trend to ride.` };
-    if (side === "long" && d.plusDI[i]! <= d.minusDI[i]!)
-      return { skip: `MACD crossed up with ADX ${r(d.adx[i]!)}, but −DI ${r(d.minusDI[i]!)} ≥ +DI ${r(d.plusDI[i]!)}: the trend is down.` };
-    if (side === "short" && d.minusDI[i]! <= d.plusDI[i]!)
-      return { skip: `MACD crossed down with ADX ${r(d.adx[i]!)}, but +DI ${r(d.plusDI[i]!)} ≥ −DI ${r(d.minusDI[i]!)}: the trend is up.` };
-    const close = c[i].close;
-    const dist = MA_P.stopAtr * a[i]!;
-    const sign = side === "long" ? 1 : -1;
-    return {
-      side,
-      stop: close - sign * dist,
-      takeProfit: close + sign * dist * MA_P.targetR,
-      reason: `${dirWord(side)}: MACD (${px(m.line[i]!)}) crossed ${up ? "above" : "below"} its signal (${px(m.signal[i]!)}) while ADX is ${r(d.adx[i]!)} and ${up ? "+DI" : "−DI"} leads (${r(up ? d.plusDI[i]! : d.minusDI[i]!)} vs ${r(up ? d.minusDI[i]! : d.plusDI[i]!)}), so momentum is turning in the direction of an established trend.`,
-      indicators: ind,
-    };
-  },
-  manage(c, tr) {
-    const i = c.length - 1;
-    const m = macd(closes(c), MA_P.fast, MA_P.slow, MA_P.signal);
-    if (tr.side === "long" && crossDown(m.line, m.signal, i))
-      return { exit: { reason: "signal", note: `MACD crossed back below its signal (${px(m.line[i]!)} < ${px(m.signal[i]!)}): momentum faded.` } };
-    if (tr.side === "short" && crossUp(m.line, m.signal, i))
-      return { exit: { reason: "signal", note: `MACD crossed back above its signal (${px(m.line[i]!)} > ${px(m.signal[i]!)}): momentum faded.` } };
-    return {};
-  },
-};
-
-// ───────────────────────── 5. Supertrend ─────────────────────────
-
-const ST_P = { atrPeriod: 10, factor: 3, adx: 14, minAdx: 20 };
-
-export const supertrendStrat: StrategyDef = {
-  key: "supertrend",
-  name: "Supertrend Flip",
-  version: 1,
-  summary: "Enter when Supertrend(10, 3) flips, if ADX ≥ 20. The Supertrend line is the trailing stop.",
-  params: ST_P,
+  summary: `Two swing highs (or lows) at the same price, entered on the close through the neckline. ${P.targetR}R target.`,
+  params: DT_P,
   warmup: 200,
-  rules: `**Idea.** Supertrend is an ATR-based trailing line. A flip marks a change of trend, and the line then trails price.
+  rules: `**Idea.** Two failed attempts at the same price show the move is exhausted. The pattern completes when price closes through the low between the two tops (the neckline).
 
-**Long entry**
-- Supertrend (ATR 10, factor 3) flips from down to up on the last closed bar
-- *Modification:* ADX(14) ≥ 20. Supertrend whipsaws in flat markets, and this filter skips the worst of them.
+**Short entry: double top** (on the last closed bar)
+- Two confirmed swing highs within the last ${DT_P.window} bars, at least ${DT_P.minGap} bars apart, within ${DT_P.tolAtr} × ATR(${P.atr}) of each other
+- The pattern is at least ${DT_P.minHeightAtr} × ATR tall (tops to neckline)
+- Since the second top, no bar closed above the tops, and this is the first close below the neckline, at most ${DT_P.maxAge} bars after the second top
 
-**Short entry** is the mirror image (a flip from up to down).
+**Long entry: double bottom** is the mirror image.
 
-**Risk**
-- Stop: the Supertrend line at entry, about 3 × ATR away
-- Trailing stop: the Supertrend line, moved at each bar close (only in the trade's favour)
-- No fixed target. A flip the other way closes the trade at market.`,
+**Stop.** The middle of the pattern (halfway between the neckline and the tops), plus ${P.stopBufAtr} × ATR.
+
+${RISK_TEXT}`,
   entry(c) {
     const i = c.length - 1;
-    const st = supertrend(c, ST_P.factor, ST_P.atrPeriod);
-    const d = dmi(c, ST_P.adx);
-    if (st.dir[i - 1] == null || st.dir[i] == null || d.adx[i] == null) return null;
-    if (st.dir[i] === st.dir[i - 1]) return null;
-    const side: Side = st.dir[i] === 1 ? "long" : "short";
-    const close = c[i].close;
-    const ind = { close: px(close), supertrend: px(st.line[i]!), adx14: r(d.adx[i]!), plusDI: r(d.plusDI[i]!), minusDI: r(d.minusDI[i]!) };
-    if (d.adx[i]! < ST_P.minAdx) return { skip: `Supertrend flipped ${side === "long" ? "up" : "down"}, but ADX ${r(d.adx[i]!)} < ${ST_P.minAdx}: a choppy market.` };
-    return {
-      side,
-      stop: st.line[i]!,
-      takeProfit: null,
-      reason: `${dirWord(side)}: Supertrend(10, 3) flipped ${side === "long" ? "up (close above the upper band)" : "down (close below the lower band)"} with ADX ${r(d.adx[i]!)} confirming a trend. The stop is the Supertrend line at ${px(st.line[i]!)} and it will trail.`,
-      indicators: ind,
-    };
+    const a = atr(c, P.atr);
+    if (a[i] == null) return null;
+    const at = a[i]!;
+    const bar = c[i];
+    const pivots = swings(c, DT_P.swingLeft, DT_P.swingRight, i - 1, Math.max(0, i - DT_P.window));
+    for (const kind of ["high", "low"] as const) {
+      const top = kind === "high";
+      const ps = pivots.filter((p) => p.kind === kind);
+      for (let n = ps.length - 1; n >= 1; n--) {
+        const p2 = ps[n];
+        if (i - p2.i > DT_P.maxAge) break;
+        for (let m = n - 1; m >= 0; m--) {
+          const p1 = ps[m];
+          if (p2.i - p1.i < DT_P.minGap || Math.abs(p1.price - p2.price) > DT_P.tolAtr * at) continue;
+          const edge = top ? Math.max(p1.price, p2.price) : Math.min(p1.price, p2.price);
+          let neck = top ? Infinity : -Infinity;
+          for (let k = p1.i; k <= p2.i; k++) neck = top ? Math.min(neck, c[k].low) : Math.max(neck, c[k].high);
+          const height = Math.abs(edge - neck);
+          if (height < DT_P.minHeightAtr * at) continue;
+          if (top ? bar.close >= neck : bar.close <= neck) continue;
+          let clean = true;
+          for (let k = p2.i + 1; k < i && clean; k++) if (top ? c[k].close > edge || c[k].close < neck : c[k].close < edge || c[k].close > neck) clean = false;
+          if (!clean) continue;
+          const side: Side = top ? "short" : "long";
+          const mid = (edge + neck) / 2;
+          return signal(
+            side,
+            bar.close,
+            top ? mid + P.stopBufAtr * at : mid - P.stopBufAtr * at,
+            `${dirWord(side)}: double ${top ? "top" : "bottom"} at ${px(p1.price)} and ${px(p2.price)} (${p2.i - p1.i} bars apart). The bar closed ${top ? "below" : "above"} the neckline ${px(neck)}, which completes the pattern.`,
+            { first: px(p1.price), second: px(p2.price), neckline: px(neck), atr14: px(at) },
+          );
+        }
+      }
+    }
+    return null;
   },
-  manage(c, tr) {
-    const i = c.length - 1;
-    const st = supertrend(c, ST_P.factor, ST_P.atrPeriod);
-    if (st.dir[i] == null) return {};
-    const flippedAgainst = (tr.side === "long" && st.dir[i] === -1) || (tr.side === "short" && st.dir[i] === 1);
-    if (flippedAgainst) return { exit: { reason: "signal", note: `Supertrend flipped ${tr.side === "long" ? "down" : "up"} at the bar close: the trend is over.` } };
-    return { stop: st.line[i]!, stopNote: `trail to the Supertrend line ${px(st.line[i]!)}` };
-  },
+  manage: noManage,
 };
 
-// ───────────────────────── v2: trailing exits ─────────────────────────
-//
-// A year replay with slippage (docs/strategies/V2-PLAN.md) showed where the two cross strategies
-// lose: the 208 trades closed by the opposite cross averaged −0.37R, while trades closed by a
-// trailing stop averaged +0.34R. The cross arrives after the move has already been given back.
-// The v2 variants keep the original trigger and initial stop, drop the opposite-cross exit and
-// the fixed 2R target, and trail a chandelier stop instead. They are new keys with their own
-// accounts: the originals keep running unchanged, so the two can be compared.
+// ───────────────────────── Registry ─────────────────────────
 
-/**
- * `base` with a chandelier trailing stop as its only exit: the best price since entry minus
- * `trailAtr` × ATR(`atr`). The engine only ever tightens a stop, so until the trail passes the
- * initial stop the initial stop stands.
- */
-export function withChandelier(
-  base: StrategyDef,
-  p: { atr: number; trailAtr: number },
-  meta: { key: string; name: string; version: number; summary: string; rules: string },
-): StrategyDef {
-  const params = Object.fromEntries(Object.entries(base.params).filter(([k]) => k !== "targetR"));
-  return {
-    ...base,
-    ...meta,
-    params: { ...params, trailAtr: p.trailAtr },
-    entry(c) {
-      const sig = base.entry(c);
-      if (!sig || "skip" in sig) return sig;
-      return { ...sig, takeProfit: null, reason: `${sig.reason} No fixed target: a ${p.trailAtr}×ATR chandelier stop trails the trade.` };
-    },
-    manage(c, tr): ManageResult {
-      if (tr.barsHeld < 1) return {};
-      const i = c.length - 1;
-      const a = atr(c, p.atr);
-      if (a[i] == null) return {};
-      const held = Math.min(tr.barsHeld, c.length);
-      const stop = tr.side === "long" ? highest(c, i, held) - p.trailAtr * a[i]! : lowest(c, i, held) + p.trailAtr * a[i]!;
-      return { stop, stopNote: `trail ${p.trailAtr}×ATR ${tr.side === "long" ? "below the highest high" : "above the lowest low"} since entry: ${px(stop)}` };
-    },
-  };
-}
+/** Every rule set that was backtested. */
+export const CANDIDATES: StrategyDef[] = [fvg, orderBlock, liquiditySweep, bosPullback, srBounce, srBreakRetest, emaPullback, donchianBreakout, bbRsiReversion, doubleTopBottom];
 
-const TRAIL_ATR = 3;
-
-export const emaTrendV2 = withChandelier(emaTrend, { atr: EMA_P.atr, trailAtr: TRAIL_ATR }, {
-  key: "ema_trend_v2",
-  name: "EMA Trend Cross v2",
-  version: 2,
-  summary: `9/21 EMA crossover in the direction of the 200 EMA. 1.5×ATR stop, then a ${TRAIL_ATR}×ATR chandelier trail. No fixed target, no exit on the opposite cross.`,
-  rules: `**Idea.** The same entry as \`ema_trend\`, with the exit changed: let the trend run and leave on a trailing stop, not on the opposite cross.
-
-**Long entry** (all on the last closed bar)
-- EMA 9 crosses above EMA 21
-- Close is above EMA 200 (long-term uptrend)
-
-**Short entry** is the mirror image: EMA 9 crosses below EMA 21 with the close below EMA 200.
-
-**Risk**
-- Initial stop: 1.5 × ATR(14) from the entry price
-- Trailing stop: the highest high since entry minus ${TRAIL_ATR} × ATR(14) for a long (the lowest low plus ${TRAIL_ATR} × ATR for a short), moved only in the trade's favour at each bar close
-- *Modification (v2):* no fixed 2R target and no exit on the opposite EMA cross. On a year of history with slippage, trades closed by the opposite cross averaged −0.37R, trades closed by a trailing stop +0.34R.`,
-});
-
-export const macdAdxV2 = withChandelier(macdAdx, { atr: MA_P.atr, trailAtr: TRAIL_ATR }, {
-  key: "macd_adx_v2",
-  name: "MACD Momentum + ADX v2",
-  version: 2,
-  summary: `MACD/signal cross when ADX > 25 and the DMI agrees. 1.5×ATR stop, then a ${TRAIL_ATR}×ATR chandelier trail. No fixed target, no exit on the opposite cross.`,
-  rules: `**Idea.** The same entry as \`macd_adx\`, with the exit changed: let the trend run and leave on a trailing stop, not on the opposite cross.
-
-**Long entry**
-- MACD (12, 26) crosses above its 9-period signal line
-- ADX(14) ≥ 25 (trending market)
-- +DI > −DI (the trend is up)
-
-**Short entry** is the mirror image: MACD crosses below the signal line, ADX ≥ 25, and −DI > +DI.
-
-**Risk**
-- Initial stop: 1.5 × ATR(14)
-- Trailing stop: the highest high since entry minus ${TRAIL_ATR} × ATR(14) for a long (the lowest low plus ${TRAIL_ATR} × ATR for a short), moved only in the trade's favour at each bar close
-- *Modification (v2):* no fixed 2R target and no exit on the opposite MACD cross. On a year of history with slippage, trades closed by the opposite cross averaged −0.37R, trades closed by a trailing stop +0.34R.`,
-});
-
-// ───────────────────────── "+ News" twins ─────────────────────────
-
-/**
- * The strategies that get a news twin: same trigger, stops and exits, plus the news gate
- * (news.ts). Chosen from a 365-day backtest of all 30 setups: MACD+ADX and Donchian have the
- * most profitable timeframes, and Supertrend 1d has the best profit factor. A twin is a new
- * track record next to its original, so the two can be compared head to head.
- */
-export const NEWS_TWINS = ["macd_adx", "donchian", "supertrend"];
-
-function withNews(base: StrategyDef): StrategyDef {
-  return {
-    ...base,
-    key: `${base.key}_news`,
-    name: `${base.name} + News`,
-    baseKey: base.key,
-    newsAware: true,
-    summary: `${base.summary} Also waits out fresh high-impact crypto news and does not trade against one-sided news.`,
-    rules: `${base.rules}
-
-**News filter** (this variant only; everything above is unchanged)
-- Headlines from CoinDesk, Cointelegraph and Decrypt are scored (bullish/bearish keywords, fading with a 6-hour half-life) for the coin, plus half of the market-wide news. The Fear & Greed index is recorded too.
-- *Wait out events:* no entry in either direction while the event risk is ≥ 0.55. A fresh hack, exploit, ban, lawsuit, depeg, delisting or trading halt keeps it above that for about two hours.
-- *Not against the news:* no long when the coin's news sentiment is ≤ −0.35, no short when it is ≥ +0.35.
-- If the news feed is down or older than 45 minutes, the bot trades on the indicators alone and says so in the journal.
-- *Forward test only:* there is no news history to backtest, so this variant is judged live, next to \`${base.key}\`.`,
-  };
-}
-
-// ───────────────────────── Aggressive: the playbook trader ─────────────────────────
-//
-// Not a rule set of its own. An aggressive account sees the signals of every rule set below on
-// its timeframe and lets a learned playbook (playbook.ts) decide which to take and how much to
-// risk. The trade is then managed by the rule set that produced it. The engine handles it in
-// its own branch (tick.ts, aggro.ts); entry() here never signals.
-
-const AGGRO_POOL = [emaTrend, bbRsi, donchian, macdAdx, supertrendStrat, emaTrendV2, macdAdxV2];
-const pc = (n: number) => `${+(n * 100).toFixed(1)}%`;
-
-export const aggro: StrategyDef = {
-  key: AGGRO_KEY,
-  name: "Aggressive (playbook)",
-  version: 1,
-  summary: `Takes the best-rated signal of all ${AGGRO_POOL.length} rule sets and risks up to ${pc(AGGRO.maxRisk)} of equity on it, sized by a playbook that learns from every signal. Aims for +${pc(AGGRO.dayTarget)} a day; it can bust, and a redeploy keeps what it learned.`,
-  params: { maxRiskPct: AGGRO.maxRisk * 100, minRiskPct: AGGRO.minRisk * 100, minEdgeR: AGGRO.minEdge, dayTargetPct: AGGRO.dayTarget * 100, dayStopPct: AGGRO.dayStop * 100, priorSamples: AGGRO.prior },
-  warmup: Math.max(...AGGRO_POOL.map((s) => s.warmup)),
-  timeframes: ["15m", "1h"],
-  pool: AGGRO_POOL.map((s) => s.key),
-  rules: `**Idea.** A high-risk account that does not own a rule set. It watches the signals of every rule set and bets on the ones its own record says pay, as large as that record justifies. It is built to compound fast or bust, and to come back knowing more.
-
-**Signals.** On every closed bar, each of these rule sets is asked for an entry: ${AGGRO_POOL.map((s) => s.key).join(", ")}. The confluence gate, the cooldown, lessons and probation do not apply here: the playbook decides.
-
-**Context.** Every signal is described by: the rule set, the side, the coin, the next timeframe up (with / against / mixed), the confluence band, volatility (ATR against its 100-bar average), trend strength (ADX), the side of EMA 200 and the UTC session.
-
-**Playbook.** For every context the account keeps the average result in R of all signals it has seen there, traded or not (untraded ones are replayed after slippage). The expected R of a new signal starts from all signals, moves to its rule set, then to each context of that rule set; every step is shrunk with ${AGGRO.prior} phantom samples, so a few lucky trades change little. Old samples fade, so the playbook follows the current market.
-
-**Entry.** The best-rated signal on a coin is traded if its expected R is at least +${AGGRO.minEdge}R and its rule set has ${AGGRO.minSamples}+ samples. One position per coin. Every other signal is kept and replayed, so it still teaches.
-
-**Risk**
-- Risk per trade = expected R × ${AGGRO.kelly}, between ${pc(AGGRO.minRisk)} and ${pc(AGGRO.maxRisk)} of equity. Leverage and margin caps are the shared ones, so the real risk can be lower.
-- Stop, target and trailing: those of the rule set that produced the signal.
-- Day target: once the account is up ${pc(AGGRO.dayTarget)} on the UTC day it stops entering. Day loss limit: the same at ${pc(AGGRO.dayStop)}.
-
-**Lives.** Under $10 of equity the account is busted. **Redeploy** starts the next life at the starting balance with the playbook intact. Each ended life gets a post-mortem, and the losing trades between its peak and its end are learned a second time.`,
-  entry: () => null,
-  manage: () => ({}),
-};
-
-export const STRATEGIES: StrategyDef[] = [
-  emaTrend,
-  bbRsi,
-  donchian,
-  macdAdx,
-  supertrendStrat,
-  emaTrendV2,
-  macdAdxV2,
-  ...[emaTrend, bbRsi, donchian, macdAdx, supertrendStrat].filter((s) => NEWS_TWINS.includes(s.key)).map(withNews),
-  aggro,
-];
+/** The five that trade. */
+export const STRATEGIES: StrategyDef[] = [fvg, orderBlock, bbRsiReversion, emaPullback, donchianBreakout];
 export const STRATEGY_BY_KEY: Record<string, StrategyDef> = Object.fromEntries(STRATEGIES.map((s) => [s.key, s]));
-

@@ -14,19 +14,17 @@ const report = (kind: string, created: string, extra: Record<string, unknown> = 
 test("chat context: all-time stats from the freshest report only, plus each report's own period", () => {
   const d: ChatData = {
     reports: [report("daily", "2026-10-24T00:07:00Z"), report("hourly", "2026-10-24T05:07:00Z")],
-    lessons: [{ id: "x", strategy: "donchian", timeframe: "5m", title: "skip", explanation: "e", status: "active", blocked: 3, blocked_r: -2.5, evidence: { big: true } }],
-    trades: [{ strategy: "donchian", timeframe: "5m", r_multiple: -1, review: { title: "False signal", why: "w", fix: "f", flags: [], mfeR: 0.1 } }],
+    trades: [{ strategy: "donchian_breakout", timeframe: "15m", r_multiple: -1, review: { title: "False signal", why: "w", fix: "f", flags: [], mfeR: 0.1 } }],
     openTrades: [],
-    strategies: [{ key: "donchian", name: "Donchian Breakout", summary: "s", params: {} }],
+    strategies: [{ key: "donchian_breakout", name: "Donchian Breakout", summary: "s", params: {} }],
   };
   const ctx = JSON.parse(buildContext(d, Date.UTC(2026, 9, 24, 6)));
   assert.deepEqual(ctx.allTime.setups, [{ strategy: "hourly" }], "the hourly report is fresher");
   assert.equal(ctx.allTimeAsOf, "2026-10-24T05:07:00Z");
   assert.deepEqual(ctx.reports.map((r: { kind: string }) => r.kind), ["hourly", "daily"]);
   assert.equal(ctx.reports[1].writeUp.headline, "daily headline");
-  assert.equal(ctx.lessons[0].evidence, undefined, "bulky evidence is left out");
-  assert.equal(ctx.lessons[0].blocked_r, -2.5);
-  assert.deepEqual(ctx.recentClosedTrades[0].review, { title: "False signal", why: "w", fix: "f", flags: [] });
+  assert.equal(ctx.lessons, undefined, "there are no lessons in strategy v3");
+  assert.deepEqual(ctx.recentClosedTrades[0].review, { title: "False signal", why: "w", fix: "f" }, "bulky review fields are left out");
 });
 
 test("chat history is trimmed, starts with a question and maps to Gemini roles", () => {

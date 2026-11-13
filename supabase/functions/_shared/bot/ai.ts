@@ -1,31 +1,27 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Narrative, Narrator } from "./analyze.ts";
 
-// Writes the analysis report with Claude. The numbers (stats, rankings, mistakes,
-// lessons) are all computed in analysis.ts. Claude only interprets them, coaches each
-// setup on its mistakes, and may suggest entry filters. A suggested filter is used only
-// if it passes the same check on newer trades as the mined ones (analyze.ts).
+// Writes the analysis report with Claude. The numbers (stats, rankings, mistakes) are all
+// computed in analysis.ts. Claude only interprets them and coaches each rule set on its
+// mistakes. Nothing it writes changes what the bots trade.
 
 export const AI_MODEL = "claude-opus-5-5";
 
-const SYSTEM = `You are the performance analyst for a set of crypto paper-trading bots. Each bot is one strategy on one timeframe, with its own $100 account. You get a report computed from their closed trades and write the analysis the owner reads to decide which strategies could be used with real money and how the bots should improve.
+const SYSTEM = `You are the performance analyst for a set of crypto paper-trading bots. Each bot is one rule set (for example Fair Value Gap or Order Block) on one timeframe, with its own $100 account. Every signal of a rule set is traded: there is no filter between a signal and an order. The owner is running a 2 to 4 week trial of five rule sets and will then drop the weak ones and improve the strong ones. You get a report computed from the closed trades and write the analysis the owner reads to make that decision.
 
 How to work:
-- Only state facts that are in the data. Quote the numbers you rely on (trades, R, PF, drawdown, verdict). Never invent trades or statistics.
+- Only state facts that are in the data. Quote the numbers you rely on (trades, win rate, R, PF, drawdown, verdict). Never invent trades or statistics.
 - Treat small samples as unproven. A setup with under 30 trades, or whose lcbRSlip is not positive, is not proven, however high its return. Say so plainly.
+- "strategies" is each rule set over all its timeframes: lead with it. Say which rule sets are ahead, which are behind, and whether the sample is large enough to drop or keep one yet.
 - Rank for real trading: prefer edge that survives slippage (avgRSlip, lcbRSlip), consistency (positiveWeeksPct) and shallow drawdowns over raw return.
-- For mistakes, explain why the entries failed using the review categories, flags and examples, then give concrete, testable fixes, such as a parameter change, a filter, or a different stop or exit rule. Tie each fix to the strategy's actual rules.
-- The report's "learning" section shows whether the bots are improving: "impact" is the average R per trade before the first lesson switched on vs since, "tags" are the named mistakes ranked by the R they cost, "replayed" is what the signals the bots did not trade would have made, and "gate" compares the signals the indicator gate skipped with the trades it let through. Say plainly whether entries are getting better and by how much, and call it noise when fewer than 30 trades back it.
-- A strategy whose key ends in _news is the news-aware twin of the plain strategy with the same trigger. Compare each twin with its original on the same timeframe before saying news helps.
-- Features starting with mk_ are named entry mistakes (value "yes"); prefer them in candidate_filters when the mistakes data points to one.
-- candidate_filters are entry filters the bots could learn ("skip entries when <feature> <op> <value>"). Use only features from filterFeatures and the setups in the data. Suggest at most 3, and only where the mistakes or timing data point to them; it is fine to suggest none. Use timeframe "" for every timeframe of a strategy. Each one is tested on newer trades before it is used.
+- For mistakes, explain why the entries failed using the review categories and examples, then give concrete, testable changes to the rule set: a parameter, a stop or target rule, a timeframe to drop. Tie each one to the rule set's actual rules.
 - Write in plain, direct English for a trader. Keep each paragraph or item to one to three sentences.`;
 
 const str = { type: "string" } as const;
 const SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["headline", "summary", "ranking_notes", "mistakes", "improvements", "caveats", "candidate_filters"],
+  required: ["headline", "summary", "ranking_notes", "mistakes", "improvements", "caveats"],
   properties: {
     headline: { type: "string", description: "One sentence: the most important takeaway of this period." },
     summary: { type: "array", items: str, description: "Two to four short paragraphs on the period and the overall state of the bots." },
@@ -41,22 +37,6 @@ const SCHEMA = {
       description: "Concrete changes per strategy/timeframe (scope), what to do (action) and why (rationale).",
     },
     caveats: { type: "array", items: str },
-    candidate_filters: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["strategy", "timeframe", "feature", "op", "value", "reason"],
-        properties: {
-          strategy: str,
-          timeframe: { type: "string", description: 'A timeframe such as "1h", or "" for every timeframe.' },
-          feature: str,
-          op: { type: "string", enum: ["lt", "gte", "eq"] },
-          value: { type: "string", description: "A number for numeric features, or the category value." },
-          reason: str,
-        },
-      },
-    },
   },
 };
 
@@ -81,8 +61,6 @@ export function claudeNarrator(apiKey: string, model = AI_MODEL): Narrator {
     if (response.stop_reason === "refusal") throw new Error("Claude declined to write this report");
     if (response.stop_reason === "max_tokens") throw new Error("Claude's report was cut off (max_tokens)");
     const text = response.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("");
-    const parsed = JSON.parse(text) as Narrative;
-    parsed.candidate_filters = (parsed.candidate_filters ?? []).map((c) => ({ ...c, timeframe: c.timeframe ? c.timeframe : null }));
-    return { narrative: parsed, model: response.model };
+    return { narrative: JSON.parse(text) as Narrative, model: response.model };
   };
 }

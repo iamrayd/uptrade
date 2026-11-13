@@ -1,10 +1,10 @@
-// UpTrade bot analysis: reviews closed trades, learns entry filters from losers, and writes
+// UpTrade bot analysis: reviews closed trades, scores each rule set and timeframe, and writes
 // hourly/daily/weekly/monthly reports. pg_cron calls this every hour (see supabase/bot_cron.sql).
 //
 // Deploy:   supabase functions deploy bot-analyze --no-verify-jwt
 // Secrets:  BOT_CRON_SECRET (same as bot-tick), and optionally ANTHROPIC_API_KEY for the
 //           AI write-up. Without a key, reports use the built-in template; everything
-//           else (rankings, reviews, learning) works the same.
+//           else (rankings, reviews) works the same.
 //           AI_REPORT_KINDS: comma-separated kinds that get the AI write-up (default "daily,weekly,monthly").
 // SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided by Supabase automatically.
 

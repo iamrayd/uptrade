@@ -84,7 +84,7 @@ export function AnalysisChat() {
         )}
       </div>
       <p className="text-xs text-faint">
-        Answers come from your latest reports, lessons and recent trades, by Google Gemini (free tier: Google may use these prompts to improve its models).
+        Answers come from your latest reports and recent trades, by Google Gemini (free tier: Google may use these prompts to improve its models).
       </p>
 
       {msgs.length === 0 ? (

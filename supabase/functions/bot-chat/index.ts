@@ -1,5 +1,5 @@
 // UpTrade analysis chatbot. The app calls this with the signed-in user's session; it reads
-// that user's own reports, lessons and trades (row-level security applies) and asks Gemini.
+// that user's own reports and trades (row-level security applies) and asks Gemini.
 //
 // Deploy:   supabase functions deploy bot-chat        (keep JWT verification ON: only signed-in users)
 // Secrets:  GEMINI_API_KEY  (free key from https://aistudio.google.com/apikey)
@@ -55,19 +55,18 @@ Deno.serve(async (req) => {
   try {
     const latest = (kind: string) =>
       get<ChatData["reports"]>(`bot_reports?select=kind,period_start,period_end,created_at,data,narrative&kind=eq.${kind}&order=period_start.desc&limit=1`);
-    const [hourly, daily, weekly, monthly, lessons, trades, openTrades, strategies] = await Promise.all([
+    const [hourly, daily, weekly, monthly, trades, openTrades, strategies] = await Promise.all([
       latest("hourly"),
       latest("daily"),
       latest("weekly"),
       latest("monthly"),
-      get<ChatData["lessons"]>("bot_lessons?select=*&order=created_at.desc&limit=50"),
       get<ChatData["trades"]>(
         "bot_trades?select=strategy,timeframe,symbol,side,opened_at,closed_at,exit_reason,r_multiple,net_pnl,entry_reason,review&status=eq.closed&order=closed_at.desc&limit=40",
       ),
       get<ChatData["openTrades"]>("bot_trades?select=strategy,timeframe,symbol,side,entry_price,stop_price,take_profit,opened_at&status=eq.open"),
       get<ChatData["strategies"]>("bot_strategies?select=key,name,summary,params"),
     ]);
-    data = { reports: [...hourly, ...daily, ...weekly, ...monthly], lessons, trades, openTrades, strategies };
+    data = { reports: [...hourly, ...daily, ...weekly, ...monthly], trades, openTrades, strategies };
   } catch (e) {
     return reply({ error: `Couldn't load the analysis: ${e instanceof Error ? e.message : String(e)}` });
   }

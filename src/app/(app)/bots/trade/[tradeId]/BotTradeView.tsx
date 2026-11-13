@@ -1,31 +1,28 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { fetchKlines, INTERVAL_SECONDS, INTERVALS, type Interval } from "@/lib/binance";
 import { useBotTrade } from "@/hooks/useBots";
 import { usePrices, useSymbolInfo } from "@/hooks/useMarket";
-import { EXIT_LABEL, botUnrealized, fmtR, priceToR } from "@/lib/bots";
+import { EXIT_LABEL, botUnrealized, fmtR, priceToR, readingLabel } from "@/lib/bots";
 import { DEFAULT_INDICATORS, type IndicatorConfig } from "@/lib/indicators";
 import { baseAsset, fmtDateTime, fmtDuration, fmtPrice, fmtQty, fmtSignedUsd, fmtUsd, pnlClass } from "@/lib/format";
 import type { BotTrade } from "@/lib/types";
 import { Chart, type ChartLine } from "@/components/Chart";
 import { ExitBadge, RulesText, TfBadge } from "@/components/BotBits";
+import { Crumbs } from "@/components/BotNav";
 import { LevBadge } from "@/components/PositionsList";
 import { Card, EmptyState, SideBadge, Skeleton, cx } from "@/components/ui";
 
 /** Chart overlays matching what each strategy looked at. */
+const off = { ...DEFAULT_INDICATORS.ma1, on: false };
 const STRATEGY_INDICATORS: Record<string, IndicatorConfig> = {
-  ema_trend: {
-    ...DEFAULT_INDICATORS,
-    ma1: { on: true, type: "EMA", period: 9 },
-    ma2: { on: true, type: "EMA", period: 21 },
-    ma3: { on: true, type: "EMA", period: 200 },
-  },
-  bb_rsi: { ...DEFAULT_INDICATORS, ma1: { ...DEFAULT_INDICATORS.ma1, on: false }, bb: { on: true, period: 20, mult: 2 }, rsi: { on: true, period: 14 } },
-  donchian: { ...DEFAULT_INDICATORS, ma1: { ...DEFAULT_INDICATORS.ma1, on: false } },
-  macd_adx: { ...DEFAULT_INDICATORS, ma1: { ...DEFAULT_INDICATORS.ma1, on: false }, macd: { on: true, fast: 12, slow: 26, signal: 9 } },
-  supertrend: { ...DEFAULT_INDICATORS, ma1: { ...DEFAULT_INDICATORS.ma1, on: false } },
+  // The gap and the block are price zones, read from the candles: only the trend filter is a line.
+  fvg: { ...DEFAULT_INDICATORS, ma1: { on: true, type: "EMA", period: 200 } },
+  order_block: { ...DEFAULT_INDICATORS, ma1: off },
+  bb_rsi_reversion: { ...DEFAULT_INDICATORS, ma1: off, bb: { on: true, period: 20, mult: 2 }, rsi: { on: true, period: 14 } },
+  ema_pullback: { ...DEFAULT_INDICATORS, ma1: { on: true, type: "EMA", period: 20 }, ma2: { on: true, type: "EMA", period: 50 } },
+  donchian_breakout: { ...DEFAULT_INDICATORS, ma1: off },
 };
 
 export function BotTradeView({ tradeId }: { tradeId: string }) {
@@ -34,16 +31,17 @@ export function BotTradeView({ tradeId }: { tradeId: string }) {
 
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-3 lg:p-6">
-      {t ? (
-        <Link href={`/bots/${t.account_id}`} className="inline-flex h-10 items-center gap-1 text-sm text-muted hover:text-fg">
-          <svg viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <path d="m15 18-6-6 6-6" />
-          </svg>
-          {data?.strategy?.name ?? t.strategy} · {t.timeframe}
-        </Link>
-      ) : (
-        <div className="h-10" />
-      )}
+      <Crumbs
+        trail={
+          t
+            ? [
+                { label: "Bots", href: "/bots" },
+                { label: `${data?.strategy?.name ?? t.strategy}, ${t.timeframe}`, href: `/bots/${t.account_id}` },
+                { label: `${baseAsset(t.symbol)} ${t.side}` },
+              ]
+            : [{ label: "Bots", href: "/bots" }, { label: "Trade" }]
+        }
+      />
       {loading && !data ? (
         <Skeleton className="h-96" />
       ) : !t ? (
@@ -101,11 +99,11 @@ function TradeJournal({ t, strategyName, rules }: { t: BotTrade; strategyName: s
           </p>
         </Section>
 
-        <Section title="2 · Indicators at the signal">
-          <dl className="num grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
+        <Section title="2 · What it saw on the signal bar">
+          <dl className="num grid gap-x-4 gap-y-1.5 text-sm sm:grid-cols-2">
             {Object.entries(t.entry_indicators).map(([k, v]) => (
               <div key={k} className="flex justify-between gap-2 border-b border-line/50 pb-1">
-                <dt className="text-muted">{k}</dt>
+                <dt className="text-muted">{readingLabel(k)}</dt>
                 <dd className="font-medium">{Math.abs(v) >= 1 ? +v.toFixed(Math.max(0, dp)) : +v.toPrecision(5)}</dd>
               </div>
             ))}
@@ -135,8 +133,8 @@ function TradeJournal({ t, strategyName, rules }: { t: BotTrade; strategyName: s
         <Section title={t.status === "closed" ? "4 · Management & exit" : "4 · Management"}>
           <dl className="num space-y-1.5 text-sm">
             <Row k="Current stop" v={`${fmtPrice(t.stop_price, dp)}${t.trailed ? " (trailed)" : ""}`} />
-            <Row k="Best price (MFE)" v={`${fmtPrice(t.mfe_price, dp)} · ${fmtR(priceToR(t, t.mfe_price))}`} />
-            <Row k="Worst price (MAE)" v={`${fmtPrice(t.mae_price, dp)} · ${fmtR(priceToR(t, t.mae_price))}`} />
+            <Row k="Best price reached" v={`${fmtPrice(t.mfe_price, dp)} · ${fmtR(priceToR(t, t.mfe_price))}`} />
+            <Row k="Worst price reached" v={`${fmtPrice(t.mae_price, dp)} · ${fmtR(priceToR(t, t.mae_price))}`} />
             {t.status === "closed" && (
               <>
                 <Row k="Exit" v={`${fmtPrice(t.exit_price, dp)} · ${t.exit_reason ? EXIT_LABEL[t.exit_reason] : ""}`} />
@@ -199,13 +197,6 @@ function Lesson({ t }: { t: BotTrade }) {
       <div className="mt-3 rounded-lg bg-panel-2 px-3 py-2 text-xs text-muted">
         <div className="font-semibold text-fg">Review: {rv.title}</div>
         <p className="mt-1">{rv.why}</p>
-        {rv.flags.length > 0 && (
-          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-amber-400">
-            {rv.flags.map((f, i) => (
-              <li key={i}>{f}</li>
-            ))}
-          </ul>
-        )}
         {rv.outcome === "loss" && <p className="mt-1">Fix: {rv.fix}</p>}
         {rv.afterExitR != null && (
           <p className="mt-1 text-faint">
@@ -238,7 +229,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Row({ k, v, cls }: { k: string; v: string; cls?: string }) {
   return (
     <div className="flex justify-between gap-3">
-      <dt className="text-muted">{k}</dt>
+      <dt className="text-muted">{readingLabel(k)}</dt>
       <dd className={cx("text-right font-medium", cls)}>{v}</dd>
     </div>
   );

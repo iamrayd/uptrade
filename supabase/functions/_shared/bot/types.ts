@@ -64,32 +64,20 @@ export interface StrategyDef {
   params: Record<string, number>;
   /** Closed bars needed before signals are trusted (indicator warm-up). */
   warmup: number;
-  /** The strategy whose trigger, stops and exits this one reuses (news variants). The confluence gate reads the base key. */
-  baseKey?: string;
-  /** True when entries also pass the crypto-news gate (news.ts). */
-  newsAware?: boolean;
   /** The only timeframes this strategy gets an account on. Omitted: every timeframe. */
   timeframes?: readonly Timeframe[];
-  /**
-   * A meta strategy: it owns no rules. It takes the signals of these strategies and lets a learned
-   * playbook choose among them (aggro.ts). Its own entry() never signals.
-   */
-  pool?: readonly string[];
   /** Looks at the last closed bar (candles are ascending, all closed). */
   entry(candles: Candle[]): EntryResult;
   manage(candles: Candle[], trade: OpenTradeView): ManageResult;
 }
 
-export const TIMEFRAMES = ["5m", "15m", "30m", "1h", "4h", "1d"] as const;
+export const TIMEFRAMES = ["15m", "1h", "4h"] as const;
 export type Timeframe = (typeof TIMEFRAMES)[number];
 
 export const TF_SECONDS: Record<Timeframe, number> = {
-  "5m": 300,
   "15m": 900,
-  "30m": 1800,
   "1h": 3600,
   "4h": 14400,
-  "1d": 86400,
 };
 
 export const SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"] as const;

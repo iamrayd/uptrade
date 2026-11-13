@@ -98,8 +98,6 @@ export interface BotSettings {
   start_balance: number;
   risk_pct: number;
   max_leverage: number;
-  /** Switch lessons on automatically once they're confirmed on newer trades. */
-  auto_learn: boolean;
   created_at: string;
 }
 
@@ -120,38 +118,6 @@ export interface BotAccount {
   start_balance: number;
   status: "active" | "busted";
   created_at: string;
-  /** Which life the account is in (aggressive accounts restart at the starting balance on a redeploy). */
-  life: number;
-  life_started_at: string | null;
-  /** Aggressive accounts: what the account has learned. Null for the others, and before the first run. */
-  playbook: BotPlaybook | null;
-  /** Set while a redeploy the owner asked for is waiting for the next bot run. */
-  redeploy_requested_at: string | null;
-}
-
-/** Mirrors Playbook in supabase/functions/_shared/bot/playbook.ts. */
-export interface BotPlaybook {
-  v: 1;
-  /** Cell key → [weighted count, weighted sum of R]. */
-  cells: Record<string, [number, number]>;
-  learned: number;
-  cal?: { n: number; sx: number; sy: number; sxx: number; sxy: number };
-  day: { date: string; start: number; life: number } | null;
-  autopsied: number;
-  lives: BotLifeRecord[];
-}
-
-export interface BotLifeRecord {
-  life: number;
-  started_at: string | null;
-  ended_at: string;
-  cause: "busted" | "redeployed";
-  trades: number;
-  wins: number;
-  peak: number;
-  end: number;
-  fatal: { key: string; label: string; n: number; r: number }[];
-  summary: string;
 }
 
 export interface BotTrade {
@@ -192,10 +158,6 @@ export interface BotTrade {
   r_multiple: number | null;
   /** Post-mortem written by the hourly analysis (null until reviewed). */
   review: BotTradeReview | null;
-  /** The account's life the trade was opened in. */
-  life: number | null;
-  /** Aggressive accounts: the rule set the playbook chose the trade from, and what it expected. */
-  aggro: { src: string; exp: number; raw?: number; n: number; risk: number } | null;
 }
 
 export interface BotTradeReview {
@@ -208,31 +170,6 @@ export interface BotTradeReview {
   maeR: number | null;
   afterExitR: number | null;
   afterExitBars: number | null;
-  flags: string[];
-  /** Keys of the mistakes in `flags` (reviews written before tags existed have none). */
-  tags?: string[];
-}
-
-export type BotLessonStatus = "proposed" | "active" | "retired" | "rejected";
-
-export interface BotLesson {
-  id: string;
-  strategy: string;
-  timeframe: string | null;
-  feature: string;
-  op: "lt" | "gte" | "eq";
-  value: number | string;
-  status: BotLessonStatus;
-  source: "mined" | "ai";
-  title: string;
-  explanation: string;
-  blocked: number;
-  blocked_r: number;
-  retired_reason: string | null;
-  created_at: string;
-  activated_at: string | null;
-  /** The owner paused it: it is not switched back on automatically. */
-  paused: boolean;
 }
 
 export type BotReportKind = "hourly" | "daily" | "weekly" | "monthly";
@@ -286,15 +223,17 @@ export interface BotMistakeRow {
   fix: string;
 }
 
-export interface BotLessonSummary {
-  id?: string;
+/** One rule set over all its timeframes (StrategyRow in analyze.ts). */
+export interface BotStrategyRow {
   strategy: string;
-  timeframe: string | null;
-  title: string;
-  status: string;
-  source: string;
-  blocked?: number;
-  blockedR?: number;
+  name: string;
+  trades: number;
+  wins: number;
+  winRate: number | null;
+  netUsd: number;
+  avgR: number | null;
+  sumR: number;
+  profitFactor: number | null;
 }
 
 /** Mirrors ReportData in supabase/functions/_shared/bot/analyze.ts. */
@@ -311,21 +250,15 @@ export interface BotReportData {
     bySetup: { strategy: string; timeframe: string; trades: number; wins: number; netUsd: number; sumR: number }[];
   };
   setups: BotSetupStats[];
+  /** The rule sets over all their timeframes, best average R first. */
+  strategies: BotStrategyRow[];
   rankings: { best: BotSetupStats[]; effective: BotSetupStats[]; highestReturn: BotSetupStats[] };
   timing: { byHour: BotTimingRow[]; byWeekday: BotTimingRow[]; bySession: BotTimingRow[] };
   mistakes: {
     period: BotMistakeRow[];
     allTime: BotMistakeRow[];
     bySetup: { strategy: string; timeframe: string; category: string; title: string; count: number; losses: number; fix: string }[];
-    examples: { tradeId: string; strategy: string; timeframe: string; symbol: string; side: string; r: number; title: string; why: string; fix: string; flags: string[] }[];
-  };
-  lessons: { active: BotLessonSummary[]; proposed: BotLessonSummary[]; new: BotLessonSummary[]; retired: BotLessonSummary[] };
-  /** Reports written before the learning upgrade don't have this. */
-  learning?: {
-    impact: { strategy: string; timeframe: string; lessons: number; since: string; before: { n: number; avgR: number | null }; after: { n: number; avgR: number | null } }[];
-    tags: { tag: string; label: string; withN: number; withAvgR: number | null; withoutN: number; withoutAvgR: number | null; costR: number }[];
-    replayed: { reason: string; n: number; avgR: number | null }[];
-    gate: { skippedN: number; skippedAvgR: number | null; tradedN: number; tradedAvgR: number | null };
+    examples: { tradeId: string; strategy: string; timeframe: string; symbol: string; side: string; r: number; title: string; why: string; fix: string }[];
   };
 }
 

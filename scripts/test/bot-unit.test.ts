@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as appInd from "../../src/lib/indicators.ts";
 import * as ind from "../../supabase/functions/_shared/bot/indicators.ts";
-import { checkExit, closeMath, liqPrice, roundStop, sizePosition, tighterStop, toTick, TAKER_FEE, LIQ_BUFFER } from "../../supabase/functions/_shared/bot/risk.ts";
-import { STRATEGIES } from "../../supabase/functions/_shared/bot/strategies.ts";
+import { checkExit, closeMath, liqPrice, MIN_STOP_PCT, planEntry, roundStop, sizePosition, tighterStop, toTick, TAKER_FEE, LIQ_BUFFER } from "../../supabase/functions/_shared/bot/risk.ts";
+import { CANDIDATES, STRATEGIES } from "../../supabase/functions/_shared/bot/strategies.ts";
 import { backtest } from "../../supabase/functions/_shared/bot/backtest.ts";
 import type { Candle } from "../../supabase/functions/_shared/bot/types.ts";
 import { aggregate, syntheticMinutes } from "./helpers.ts";
@@ -157,23 +157,62 @@ test("prices snap to the exchange tick; stops round away from price", () => {
   assert.equal(toTick(0.000012345, 0.00000001, "down"), 0.00001234);
 });
 
+// ───────── entry planning ─────────
+
+test("planEntry widens a stop under the 0.4% minimum and keeps the reward-to-risk, for longs and shorts", () => {
+  // Long, stop 0.1% away, target 2R: widened to just over 0.4%, target still 2R.
+  const long = planEntry({ side: "long", entry: 100, stop: 99.9, takeProfit: 100.2, tick: 0.0001 });
+  assert.ok(!("skip" in long));
+  if ("skip" in long) return;
+  assert.ok((100 - long.stop) / 100 >= MIN_STOP_PCT && (100 - long.stop) / 100 < MIN_STOP_PCT * 1.01);
+  assert.ok(close((long.takeProfit! - 100) / (100 - long.stop), 2, 1e-3), "still 2R");
+  assert.ok(long.takeProfit! > 100);
+  assert.match(long.note!, /widened/);
+
+  // Short: the mirror image. The target must stay BELOW the entry.
+  const short = planEntry({ side: "short", entry: 100, stop: 100.1, takeProfit: 99.8, tick: 0.0001 });
+  assert.ok(!("skip" in short));
+  if ("skip" in short) return;
+  assert.ok((short.stop - 100) / 100 >= MIN_STOP_PCT);
+  assert.ok(short.takeProfit! < 100, "a short's target is below the entry");
+  assert.ok(close((100 - short.takeProfit!) / (short.stop - 100), 2, 1e-3), "still 2R");
+
+  // A widened order is always accepted by the sizer.
+  for (const o of [{ side: "long" as const, stop: long.stop }, { side: "short" as const, stop: short.stop }])
+    assert.ok(!("skip" in sizePosition({ side: o.side, entry: 100, stop: o.stop, equity: 100, freeBalance: 100, stepSize: 0.001, settings: S })));
+});
+
+test("planEntry leaves a wide enough stop alone, rounds to the tick, and passes a trailing-only signal through", () => {
+  const p = planEntry({ side: "long", entry: 100, stop: 98.7654, takeProfit: 102.4691, tick: 0.01 });
+  assert.deepEqual(p, { stop: 98.76, takeProfit: 102.47, note: null }, "stop rounds away from price, target to the nearest tick");
+  const s = planEntry({ side: "short", entry: 100, stop: 101.2345, takeProfit: null, tick: 0.01 });
+  assert.deepEqual(s, { stop: 101.24, takeProfit: null, note: null });
+  // No target: the stop is still widened.
+  const w = planEntry({ side: "long", entry: 100, stop: 99.99, takeProfit: null, tick: 0.01 });
+  assert.ok(!("skip" in w) && w.takeProfit === null && w.stop <= 99.6);
+});
+
+test("planEntry skips only when the price is already past the stop or the target", () => {
+  assert.ok("skip" in planEntry({ side: "long", entry: 100, stop: 100.5, takeProfit: 103, tick: 0.01 }), "through the stop");
+  assert.ok("skip" in planEntry({ side: "short", entry: 100, stop: 99.5, takeProfit: 97, tick: 0.01 }), "through the stop");
+  assert.ok("skip" in planEntry({ side: "long", entry: 100, stop: 99, takeProfit: 99.9, tick: 0.01 }), "already at the target");
+  assert.ok("skip" in planEntry({ side: "short", entry: 100, stop: 101, takeProfit: 100.1, tick: 0.01 }), "already at the target");
+});
+
 // ───────── strategies ─────────
 
-test("every strategy emits well-formed signals on synthetic markets", () => {
-  for (const tfSec of [300, 3600]) {
-    const c = aggregate(syntheticMinutes(11, T0, tfSec === 300 ? 60 * 24 * 12 : 60 * 24 * 80, 100), tfSec);
-    for (const s of STRATEGIES.filter((x) => !x.pool)) {
+test("every candidate rule set emits well-formed signals on synthetic markets", () => {
+  const total = new Map<string, number>();
+  for (const tfSec of [900, 3600]) {
+    const c = aggregate(syntheticMinutes(11, T0, tfSec === 900 ? 60 * 24 * 25 : 60 * 24 * 80, 100), tfSec);
+    for (const s of CANDIDATES) {
       let signals = 0;
-      let skips = 0;
       for (let i = s.warmup; i < c.length; i++) {
         const hist = c.slice(Math.max(0, i + 1 - 600), i + 1);
         const sig = s.entry(hist);
         if (!sig) continue;
-        if ("skip" in sig) {
-          assert.ok(sig.skip.length > 10);
-          skips++;
-          continue;
-        }
+        assert.ok(!("skip" in sig), `${s.key}: v3 rule sets signal or stay silent`);
+        if ("skip" in sig) continue;
         signals++;
         const px = hist[hist.length - 1].close;
         assert.ok(sig.side === "long" ? sig.stop < px : sig.stop > px, `${s.key}: stop on wrong side`);
@@ -184,9 +223,19 @@ test("every strategy emits well-formed signals on synthetic markets", () => {
         const m = s.manage(hist, { side: sig.side, entryPrice: px, stop: sig.stop, takeProfit: sig.takeProfit, barsHeld: 1 });
         if (m.stop != null) assert.ok(Number.isFinite(m.stop));
       }
-      assert.ok(signals + skips > 0, `${s.key} never signalled on ${tfSec}s bars`);
+      total.set(s.key, (total.get(s.key) ?? 0) + signals);
     }
   }
+  // (Hourly synthetic volume is too even for the Donchian volume rule, so the count is over both timeframes.)
+  for (const s of CANDIDATES) assert.ok(total.get(s.key)! > 0, `${s.key} never signalled`);
+});
+
+test("the live book is five rule sets, with Fair Value Gap and Order Block among them", () => {
+  assert.equal(STRATEGIES.length, 5);
+  assert.equal(new Set(STRATEGIES.map((s) => s.key)).size, 5);
+  for (const k of ["fvg", "order_block"]) assert.ok(STRATEGIES.some((s) => s.key === k), `${k} must trade`);
+  for (const s of STRATEGIES) assert.ok(CANDIDATES.includes(s), `${s.key} must be a backtested candidate`);
+  for (const s of STRATEGIES) assert.ok(s.warmup <= 600 && s.rules.length > 200 && s.summary.length > 20);
 });
 
 // ───────── backtest ─────────
@@ -197,8 +246,8 @@ test("backtest accounting balances: final equity = start + sum of trade net PnL"
     Object.entries(syms).map(([s, p], k) => [s, aggregate(syntheticMinutes(100 + k, T0, 60 * 24 * 30, p), 900)]),
   );
   const from = data.AAAUSDT[400].time;
-  for (const s of STRATEGIES) {
-    const r = backtest({ strategy: s, timeframe: "15m", candlesBySymbol: data, filters: { AAAUSDT: { step: 0.001, tick: 0.01 }, BBBUSDT: { step: 0.01, tick: 0.001 }, CCCUSDT: { step: 0.1, tick: 0.0001 } }, settings: S, startBalance: 100, from });
+  for (const s of CANDIDATES) {
+    const r = backtest({ strategy: s, timeframe: "15m", candlesBySymbol: data, filters: { AAAUSDT: { step: 0.001, tick: 0.01 }, BBBUSDT: { step: 0.01, tick: 0.001 }, CCCUSDT: { step: 0.1, tick: 0.0001 } }, settings: S, startBalance: 100, from, slippage: s.key === "fvg" ? 0.0005 : 0 });
     const sum = r.tradeList.reduce((x, t) => x + t.net, 0);
     assert.ok(close(r.finalEquity, 100 + sum, 1e-9), `${s.key}: ${r.finalEquity} vs ${100 + sum}`);
     assert.ok(r.finalEquity >= 0);
@@ -207,5 +256,40 @@ test("backtest accounting balances: final equity = start + sum of trade net PnL"
       assert.ok(t.r > -5, `${s.key}: ${t.r}R loss`);
       assert.ok(t.entryTime >= from);
     }
+  }
+});
+
+test("backtest trades every signal: each one a flat account sees becomes a trade with the rule's own stop and target", () => {
+  const sym = "AAAUSDT";
+  const c = aggregate(syntheticMinutes(7, T0, 60 * 24 * 40, 200), 900);
+  const from = c[400].time;
+  const tick = 0.01;
+  for (const s of CANDIDATES) {
+    const r = backtest({ strategy: s, timeframe: "15m", candlesBySymbol: { [sym]: c }, filters: { [sym]: { step: 0.001, tick } }, settings: { riskPct: 0.001, maxLeverage: 20, slots: 3 }, startBalance: 10000, from });
+    assert.ok(r.trades > 0, `${s.key}: no trades`);
+    const bySignalBar = new Map(r.tradeList.map((t) => [t.signalBarTime, t]));
+    // Walk the bars the same way: whenever the account is flat and the rule set signals, a trade must follow.
+    let flatFrom = 0; // index of the first bar the account is flat at its close
+    let expected = 0;
+    for (let i = 400; i < c.length - 1; i++) {
+      if (i < flatFrom || i + 1 < s.warmup) continue;
+      const sig = s.entry(c.slice(Math.max(0, i + 1 - 600), i + 1));
+      if (!sig || "skip" in sig) continue;
+      const plan = planEntry({ side: sig.side, entry: c[i + 1].open, stop: sig.stop, takeProfit: sig.takeProfit, tick });
+      if ("skip" in plan) continue; // the next open was already past the stop or target
+      expected++;
+      const t = bySignalBar.get(c[i].time);
+      assert.ok(t, `${s.key}: the signal on bar ${i} was not traded`);
+      assert.equal(t.side, sig.side);
+      assert.equal(t.entryTime, c[i + 1].time, "entered at the next bar's open");
+      assert.equal(t.stop, plan.stop, `${s.key}: stop`);
+      assert.equal(t.takeProfit, plan.takeProfit, `${s.key}: target`);
+      // Flat again at the close of the exit bar, unless it exited on that bar's open (a queued exit).
+      const exitIdx = c.findIndex((x) => x.time === t.exitTime);
+      flatFrom = t.reason === "signal" || t.reason === "time_exit" || (t.reason === "trailing_stop" && t.exit === c[exitIdx].open) ? exitIdx - 1 : exitIdx;
+      flatFrom = Math.max(flatFrom, i + 1);
+    }
+    assert.ok(expected > 0);
+    assert.equal(r.notOpened + r.trades >= expected, true);
   }
 });
